@@ -1,3 +1,15 @@
+# Unity
+*.unitypackage
+*.unitypackage.meta
+*.unitypackage.meta.meta
+*.unitypackage.meta.meta.meta
+*.unitypackage.meta.meta.meta.meta
+*.unitypackage.meta.meta.meta.meta.meta
+
+# Builds
+$Build/
+$GameBuild/
+
 # General
 .DS_Store
 *~
