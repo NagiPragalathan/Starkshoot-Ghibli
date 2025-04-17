@@ -6,6 +6,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine.SceneManagement;
+using System;
 
 public class NetworkManager : MonoBehaviourPunCallbacks {
 
@@ -56,6 +57,10 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     private float currentGameTime;
     private bool isGameActive = false;
     private Dictionary<string, int> killStreaks = new Dictionary<string, int>();
+    private float roomListUpdateTimer = 0f;
+    private const float ROOM_LIST_UPDATE_INTERVAL = 3f;
+    private Dictionary<string, RoomInfo> cachedRoomList = new Dictionary<string, RoomInfo>();
+    private Dictionary<string, int> roomPlayerCounts = new Dictionary<string, int>();
 
     // Add this class to track player statistics
     private class PlayerStats {
@@ -126,7 +131,9 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     /// Called on the client when you have successfully connected to a master server.
     /// </summary>
     public override void OnConnectedToMaster() {
-        PhotonNetwork.JoinLobby();
+        Debug.Log("Connected to Master Server. Joining lobby...");
+        // Always join the default lobby
+        PhotonNetwork.JoinLobby(TypedLobby.Default);
     }
 
     /// <summary>
@@ -134,9 +141,14 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     /// </summary>
     /// <param name="cause">DisconnectCause data associated with this disconnect.</param>
     public override void OnDisconnected(DisconnectCause cause) {
-        // Add null check before accessing UI elements
+        Debug.LogWarning($"Disconnected from server: {cause}");
         if (connectionText != null) {
-            connectionText.text = cause.ToString();
+            connectionText.text = $"Disconnected: {cause}";
+        }
+        
+        // Reset room list when disconnected
+        if (roomList != null) {
+            roomList.text = "Disconnected from server...";
         }
         
         // Reset game state
@@ -151,8 +163,11 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     /// Callback function on joined lobby.
     /// </summary>
     public override void OnJoinedLobby() {
+        Debug.Log("Joined Lobby successfully!");
         serverWindow.SetActive(true);
         connectionText.text = "";
+        
+        // The room list will automatically start updating via OnRoomListUpdate callback
     }
 
     /// <summary>
@@ -160,10 +175,71 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     /// </summary>
     /// <param name="rooms">List of RoomInfo.</param>
     public override void OnRoomListUpdate(List<RoomInfo> rooms) {
-        roomList.text = "";
+        Debug.Log($"Room list updated. Total rooms: {rooms.Count}");
+        
         foreach (RoomInfo room in rooms) {
-            roomList.text += room.Name + "\n";
+            if (room.RemovedFromList) {
+                cachedRoomList.Remove(room.Name);
+                roomPlayerCounts.Remove(room.Name);
+                continue;
+            }
+
+            // Update or add room info to cache
+            cachedRoomList[room.Name] = room;
+            roomPlayerCounts[room.Name] = room.PlayerCount;
         }
+
+        UpdateRoomListDisplay();
+    }
+
+    private void UpdateRoomListDisplay() {
+        if (roomList == null) return;
+
+        if (cachedRoomList.Count == 0) {
+            roomList.text = "No rooms available.";
+            return;
+        }
+
+        roomList.text = "";
+        foreach (var kvp in cachedRoomList) {
+            RoomInfo room = kvp.Value;
+            if (room == null) continue;
+
+            // Get the current player count from our tracking dictionary
+            int currentPlayerCount = roomPlayerCounts.ContainsKey(room.Name) ? 
+                roomPlayerCounts[room.Name] : room.PlayerCount;
+
+            string roomStatus = GetRoomStatusText(room, currentPlayerCount);
+            
+            roomList.text += $"Room: {room.Name}\n" +
+                            $"Players: {currentPlayerCount}/{room.MaxPlayers}\n" +
+                            $"Status: {roomStatus}\n" +
+                            GetRoomCustomPropertiesText(room) +
+                            "-------------------\n";
+        }
+    }
+
+    private string GetRoomStatusText(RoomInfo room, int currentPlayerCount) {
+        if (!room.IsOpen) return "Closed";
+        if (currentPlayerCount >= room.MaxPlayers) return "Full";
+        if (room.CustomProperties.ContainsKey("GameState")) {
+            string gameState = (string)room.CustomProperties["GameState"];
+            if (gameState == "InProgress") return "Game in Progress";
+            if (gameState == "Ending") return "Game Ending";
+        }
+        return "Waiting for Players";
+    }
+
+    private string GetRoomCustomPropertiesText(RoomInfo room) {
+        if (room == null || room.CustomProperties == null) return "";
+
+        string properties = "";
+        if (room.CustomProperties.ContainsKey("GameTime")) {
+            float gameTime = (float)room.CustomProperties["GameTime"];
+            int minutes = Mathf.FloorToInt(gameTime / 60f);
+            properties += $"Game Time: {minutes} minutes\n";
+        }
+        return properties;
     }
 
     /// <summary>
@@ -177,11 +253,18 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         
         RoomOptions roomOptions = new RoomOptions() {
             IsVisible = true,
+            IsOpen = true,
             MaxPlayers = 8,
-            CustomRoomProperties = new ExitGames.Client.Photon.Hashtable()
-            {
-                {"GameTime", timeOptions[timeSelectionDropdown.value]}
-            }
+            PublishUserId = true,
+            EmptyRoomTtl = 0,
+            PlayerTtl = 0,
+            CleanupCacheOnLeave = true,
+            CustomRoomProperties = new ExitGames.Client.Photon.Hashtable() {
+                {"GameTime", timeOptions[timeSelectionDropdown.value]},
+                {"CreatedAt", DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss")},
+                {"GameState", "Waiting"}
+            },
+            CustomRoomPropertiesForLobby = new string[] { "GameTime", "CreatedAt", "GameState" }
         };
 
         if (PhotonNetwork.IsConnectedAndReady) {
@@ -195,6 +278,7 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     /// Callback function on joined room.
     /// </summary>
     public override void OnJoinedRoom() {
+        Debug.Log($"Joined room: {PhotonNetwork.CurrentRoom.Name}");
         connectionText.text = "";
         Cursor.lockState = CursorLockMode.Locked;
         Cursor.visible = false;
@@ -215,6 +299,13 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         
         // Initialize stats when joining room
         InitializePlayerStats();
+
+        // Update the room player count immediately when someone joins
+        string roomName = PhotonNetwork.CurrentRoom.Name;
+        if (roomPlayerCounts.ContainsKey(roomName)) {
+            roomPlayerCounts[roomName] = PhotonNetwork.CurrentRoom.PlayerCount;
+            photonView.RPC("UpdateRoomPlayerCount", RpcTarget.All, roomName, PhotonNetwork.CurrentRoom.PlayerCount);
+        }
     }
 
     /// <summary>
@@ -235,8 +326,8 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         yield return new WaitForSeconds(spawnTime);
         messageWindow.SetActive(true);
         sightImage.SetActive(true);
-        int playerIndex = Random.Range(0, playerModel.Length);
-        int spawnIndex = Random.Range(0, spawnPoints.Length);
+        int playerIndex = UnityEngine.Random.Range(0, playerModel.Length);
+        int spawnIndex = UnityEngine.Random.Range(0, spawnPoints.Length);
         player = PhotonNetwork.Instantiate(playerModel[playerIndex].name, spawnPoints[spawnIndex].position, spawnPoints[spawnIndex].rotation, 0);
         
         PlayerHealth playerHealth = player.GetComponent<PlayerHealth>();
@@ -281,6 +372,12 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     public override void OnPlayerLeftRoom(Player other) {
         if (PhotonNetwork.IsMasterClient) {
             AddMessage("Player " + other.NickName + " Left Game.");
+        }
+
+        string roomName = PhotonNetwork.CurrentRoom.Name;
+        if (roomPlayerCounts.ContainsKey(roomName)) {
+            roomPlayerCounts[roomName] = PhotonNetwork.CurrentRoom.PlayerCount;
+            photonView.RPC("UpdateRoomPlayerCount", RpcTarget.All, roomName, PhotonNetwork.CurrentRoom.PlayerCount);
         }
     }
 
@@ -380,6 +477,29 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
                     currentGameTime = 0;
                     photonView.RPC("EndGame", RpcTarget.All);
                 }
+            }
+        }
+
+        // Add room list refresh logic when in lobby
+        if (PhotonNetwork.InLobby && !PhotonNetwork.InRoom) {
+            roomListUpdateTimer -= Time.deltaTime;
+            if (roomListUpdateTimer <= 0f) {
+                roomListUpdateTimer = ROOM_LIST_UPDATE_INTERVAL;
+                // Room list updates are automatically sent by the server
+                // We just need to make sure we're properly handling the OnRoomListUpdate callback
+                UpdateRoomListDisplay();
+            }
+        }
+
+        // Add periodic refresh for room list
+        float refreshTimer = 0f;
+        const float REFRESH_INTERVAL = 1f; // Update every second
+
+        if (PhotonNetwork.InLobby && !PhotonNetwork.InRoom) {
+            refreshTimer -= Time.deltaTime;
+            if (refreshTimer <= 0f) {
+                refreshTimer = REFRESH_INTERVAL;
+                UpdateRoomListDisplay();
             }
         }
     }
@@ -557,11 +677,32 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
 
     // Add method to handle room property updates
     public override void OnRoomPropertiesUpdate(ExitGames.Client.Photon.Hashtable propertiesThatChanged) {
-        if (propertiesThatChanged.ContainsKey("GameTime")) {
-            float newTime = (float)propertiesThatChanged["GameTime"];
-            currentGameTime = newTime;
-            if (timerText != null) {
-                timerText.text = FormatTime(currentGameTime);
+        base.OnRoomPropertiesUpdate(propertiesThatChanged);
+        
+        if (PhotonNetwork.InRoom) {
+            string roomName = PhotonNetwork.CurrentRoom.Name;
+            if (cachedRoomList.ContainsKey(roomName)) {
+                // Update only the properties that changed
+                RoomInfo currentRoomInfo = cachedRoomList[roomName];
+                if (currentRoomInfo != null) {
+                    // Update the cached room info with new properties
+                    UpdateCachedRoomInfo(roomName, propertiesThatChanged);
+                    UpdateRoomListDisplay();
+                }
+            }
+        }
+    }
+
+    // Add this helper method to update cached room info
+    private void UpdateCachedRoomInfo(string roomName, ExitGames.Client.Photon.Hashtable properties) {
+        if (cachedRoomList.TryGetValue(roomName, out RoomInfo roomInfo)) {
+            // Update only the properties that changed
+            foreach (DictionaryEntry entry in properties) {
+                if (roomInfo.CustomProperties.ContainsKey(entry.Key)) {
+                    roomInfo.CustomProperties[entry.Key] = entry.Value;
+                } else {
+                    roomInfo.CustomProperties.Add(entry.Key, entry.Value);
+                }
             }
         }
     }
@@ -635,6 +776,43 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     public void ResetKillStreak(string playerName) {
         if (killStreaks.ContainsKey(playerName)) {
             killStreaks[playerName] = 0;
+        }
+    }
+
+    public override void OnCreatedRoom() {
+        Debug.Log($"Room created successfully: {PhotonNetwork.CurrentRoom.Name}");
+        // The room list will automatically update for all clients in the lobby
+    }
+
+    public override void OnCreateRoomFailed(short returnCode, string message) {
+        Debug.LogError($"Failed to create room: {message}");
+        connectionText.text = $"Room creation failed: {message}";
+        serverWindow.SetActive(true);
+    }
+
+    public override void OnJoinRoomFailed(short returnCode, string message) {
+        Debug.LogError($"Failed to join room: {message}");
+        connectionText.text = $"Failed to join room: {message}";
+        serverWindow.SetActive(true);
+    }
+
+    // Add these new callbacks to track player join/leave events
+    public override void OnPlayerEnteredRoom(Player newPlayer) {
+        base.OnPlayerEnteredRoom(newPlayer);
+        
+        string roomName = PhotonNetwork.CurrentRoom.Name;
+        if (roomPlayerCounts.ContainsKey(roomName)) {
+            roomPlayerCounts[roomName] = PhotonNetwork.CurrentRoom.PlayerCount;
+            // Update all clients
+            photonView.RPC("UpdateRoomPlayerCount", RpcTarget.All, roomName, PhotonNetwork.CurrentRoom.PlayerCount);
+        }
+    }
+
+    [PunRPC]
+    private void UpdateRoomPlayerCount(string roomName, int playerCount) {
+        if (roomPlayerCounts.ContainsKey(roomName)) {
+            roomPlayerCounts[roomName] = playerCount;
+            UpdateRoomListDisplay();
         }
     }
 
