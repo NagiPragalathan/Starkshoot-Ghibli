@@ -4,15 +4,15 @@ using Photon.Pun;
 public class CloudManager : MonoBehaviourPunCallbacks
 {
     [System.Serializable]
-    public class CloudRoute
+    public class CloudSetup
     {
         public GameObject startPoint;
         public GameObject endPoint;
     }
 
     [SerializeField] private GameObject cloudPrefab;
-    [SerializeField] private CloudRoute[] cloudRoutes;
-    
+    [SerializeField] private CloudSetup[] cloudSetups;
+
     private void Start()
     {
         if (PhotonNetwork.IsMasterClient)
@@ -23,38 +23,38 @@ public class CloudManager : MonoBehaviourPunCallbacks
 
     private void SpawnClouds()
     {
-        foreach (CloudRoute route in cloudRoutes)
+        foreach (CloudSetup setup in cloudSetups)
         {
-            if (route.startPoint == null || route.endPoint == null)
+            if (setup.startPoint == null || setup.endPoint == null)
             {
-                Debug.LogError("Cloud route is missing start or end point!");
+                Debug.LogError("[CloudManager] Missing start or end point!");
                 continue;
             }
 
-            // Spawn cloud at start position
-            GameObject cloud = PhotonNetwork.Instantiate(cloudPrefab.name, 
-                route.startPoint.transform.position, 
-                Quaternion.identity);
+            GameObject cloudObj = PhotonNetwork.Instantiate(
+                cloudPrefab.name, 
+                setup.startPoint.transform.position, 
+                Quaternion.identity
+            );
 
-            // Configure cloud movement
-            CloudMovement cloudMove = cloud.GetComponent<CloudMovement>();
+            CloudMovement cloudMove = cloudObj.GetComponent<CloudMovement>();
             if (cloudMove != null)
             {
-                // Set references through reflection since they're private
-                var startPointField = cloudMove.GetType().GetField("startPointObject", 
-                    System.Reflection.BindingFlags.NonPublic | 
-                    System.Reflection.BindingFlags.Instance);
-                    
-                var endPointField = cloudMove.GetType().GetField("endPointObject", 
-                    System.Reflection.BindingFlags.NonPublic | 
-                    System.Reflection.BindingFlags.Instance);
-
-                if (startPointField != null && endPointField != null)
-                {
-                    startPointField.SetValue(cloudMove, route.startPoint);
-                    endPointField.SetValue(cloudMove, route.endPoint);
-                }
+                cloudMove.startPointObject = setup.startPoint;
+                cloudMove.endPointObject = setup.endPoint;
             }
+        }
+    }
+
+    // Optional: Add method to verify cloud synchronization
+    public void VerifyCloudSync()
+    {
+        CloudMovement[] clouds = FindObjectsOfType<CloudMovement>();
+        foreach (CloudMovement cloud in clouds)
+        {
+            Debug.Log($"Cloud {cloud.gameObject.name} - Position: {cloud.transform.position}, " +
+                      $"IsMine: {cloud.photonView.IsMine}, " +
+                      $"Owner: {cloud.photonView.Owner?.NickName}");
         }
     }
 } 

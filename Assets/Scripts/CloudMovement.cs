@@ -4,54 +4,53 @@ using Photon.Pun;
 public class CloudMovement : MonoBehaviourPunCallbacks, IPunObservable
 {
     [Header("Position References")]
-    [SerializeField] private GameObject startPointObject;
-    [SerializeField] private GameObject endPointObject;
+    public GameObject startPointObject;
+    public GameObject endPointObject;
 
-    [Header("Movement Settings")]
+    [Header("Settings")]
     [SerializeField] private float moveSpeed = 2f;
     [SerializeField] private float waitTimeAtEnds = 2f;
-    [SerializeField] private float networkSmoothTime = 0.1f;
 
     private Vector3 startPosition;
     private Vector3 endPosition;
     private Vector3 networkPosition;
-    private Vector3 velocity;
     private bool movingToEnd = true;
     private float waitTimer = 0f;
+    private bool isInitialized = false;
+    new public PhotonView photonView;
+
+    private void Awake()
+    {
+        photonView = GetComponent<PhotonView>();
+    }
 
     private void Start()
     {
         if (startPointObject == null || endPointObject == null)
         {
-            Debug.LogError("Start or End point objects not set for cloud! Please assign them in the inspector.");
+            Debug.LogError($"[CloudMovement] Points not set for cloud {gameObject.name}!");
             enabled = false;
             return;
         }
 
-        // Get positions from the GameObjects
         startPosition = startPointObject.transform.position;
         endPosition = endPointObject.transform.position;
-
-        // Set initial position
         transform.position = startPosition;
         networkPosition = startPosition;
+        isInitialized = true;
 
-        Debug.Log($"Cloud initialized - Start: {startPosition}, End: {endPosition}");
+        Debug.Log($"[CloudMovement] Cloud initialized at {startPosition}");
     }
 
     private void Update()
     {
-        if (PhotonNetwork.IsMasterClient)
-        {
-            UpdateMasterClient();
-        }
-        else
-        {
-            UpdateClient();
-        }
+        if (!isInitialized) return;
+
+        // ALL clients update movement
+        UpdateMovement();
     }
 
-    private void UpdateMasterClient()
+    private void UpdateMovement()
     {
         if (waitTimer > 0)
         {
@@ -60,38 +59,27 @@ public class CloudMovement : MonoBehaviourPunCallbacks, IPunObservable
         }
 
         Vector3 targetPosition = movingToEnd ? endPosition : startPosition;
-        
-        // Calculate smooth movement
         float step = moveSpeed * Time.deltaTime;
-        Vector3 newPosition = Vector3.MoveTowards(transform.position, targetPosition, step);
-        
-        // Apply movement with route clamping
-        Vector3 routeDirection = (endPosition - startPosition).normalized;
-        float distanceAlongRoute = Vector3.Dot(newPosition - startPosition, routeDirection);
-        float totalRouteLength = Vector3.Distance(startPosition, endPosition);
-        distanceAlongRoute = Mathf.Clamp(distanceAlongRoute, 0f, totalRouteLength);
-        
-        transform.position = startPosition + (routeDirection * distanceAlongRoute);
-        networkPosition = transform.position;
+        transform.position = Vector3.MoveTowards(transform.position, targetPosition, step);
 
-        if (Vector3.Distance(transform.position, targetPosition) < 0.01f)
+        // Only master client changes direction
+        if (PhotonNetwork.IsMasterClient)
         {
-            movingToEnd = !movingToEnd;
-            waitTimer = waitTimeAtEnds;
-            Debug.Log($"Cloud reached {(movingToEnd ? "end" : "start")} position");
+            if (Vector3.Distance(transform.position, targetPosition) < 0.01f)
+            {
+                movingToEnd = !movingToEnd;
+                waitTimer = waitTimeAtEnds;
+                // Sync the direction change to all clients
+                photonView.RPC("SyncDirectionChange", RpcTarget.All, movingToEnd, waitTimer);
+            }
         }
     }
 
-    private void UpdateClient()
+    [PunRPC]
+    private void SyncDirectionChange(bool newMovingToEnd, float newWaitTimer)
     {
-        transform.position = Vector3.SmoothDamp(
-            transform.position,
-            networkPosition,
-            ref velocity,
-            networkSmoothTime,
-            Mathf.Infinity,
-            Time.deltaTime
-        );
+        movingToEnd = newMovingToEnd;
+        waitTimer = newWaitTimer;
     }
 
     public void OnPhotonSerializeView(PhotonStream stream, PhotonMessageInfo info)
@@ -107,6 +95,9 @@ public class CloudMovement : MonoBehaviourPunCallbacks, IPunObservable
             networkPosition = (Vector3)stream.ReceiveNext();
             movingToEnd = (bool)stream.ReceiveNext();
             waitTimer = (float)stream.ReceiveNext();
+
+            // Smooth position update
+            transform.position = Vector3.Lerp(transform.position, networkPosition, 0.5f);
         }
     }
 
@@ -115,12 +106,14 @@ public class CloudMovement : MonoBehaviourPunCallbacks, IPunObservable
         if (startPointObject != null && endPointObject != null)
         {
             Gizmos.color = Color.cyan;
-            Vector3 start = Application.isPlaying ? startPosition : startPointObject.transform.position;
-            Vector3 end = Application.isPlaying ? endPosition : endPointObject.transform.position;
-            
+            Vector3 start = startPointObject.transform.position;
+            Vector3 end = endPointObject.transform.position;
             Gizmos.DrawLine(start, end);
-            Gizmos.DrawWireSphere(start, 1f);
-            Gizmos.DrawWireSphere(end, 1f);
+            
+            Gizmos.color = Color.green;
+            Gizmos.DrawWireSphere(start, 0.5f);
+            Gizmos.color = Color.red;
+            Gizmos.DrawWireSphere(end, 0.5f);
         }
     }
 } 
