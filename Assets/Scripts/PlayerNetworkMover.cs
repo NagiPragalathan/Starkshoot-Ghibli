@@ -24,6 +24,10 @@ public class PlayerNetworkMover : MonoBehaviourPunCallbacks, IPunObservable {
     private bool jump;
     private float smoothing = 10.0f;
     private Vector3 spawnPosition;
+    private Transform platformParent;
+    private Vector3 lastPlatformPosition;
+    private bool isOnPlatform = false;
+    private CharacterController characterController;
 
     /// <summary>
     /// Move game objects to another layer.
@@ -42,6 +46,7 @@ public class PlayerNetworkMover : MonoBehaviourPunCallbacks, IPunObservable {
         // FirstPersonController script require cameraObject to be active in its Start function.
         if (photonView.IsMine) {
             cameraObject.SetActive(true);
+            characterController = GetComponent<CharacterController>();
         }
     }
 
@@ -88,6 +93,15 @@ public class PlayerNetworkMover : MonoBehaviourPunCallbacks, IPunObservable {
             if (transform.position.y < -150f) {
                 RespawnPlayer();
             }
+
+            // Handle platform movement
+            if (isOnPlatform && platformParent != null) {
+                Vector3 platformDelta = platformParent.position - lastPlatformPosition;
+                if (platformDelta.magnitude > 0) {
+                    characterController.Move(platformDelta);
+                }
+                lastPlatformPosition = platformParent.position;
+            }
         }
     }
 
@@ -96,10 +110,23 @@ public class PlayerNetworkMover : MonoBehaviourPunCallbacks, IPunObservable {
     /// </summary>
     void FixedUpdate() {
         if (photonView.IsMine) {
+            // Check if we're still on the platform
+            if (isOnPlatform) {
+                RaycastHit hit;
+                if (!Physics.Raycast(transform.position, Vector3.down, out hit, 1.1f) || 
+                    !hit.collider.CompareTag("MovingPlatform")) {
+                    Debug.Log("No longer on platform!");
+                    isOnPlatform = false;
+                    platformParent = null;
+                }
+            }
+
             animator.SetFloat("Horizontal", CrossPlatformInputManager.GetAxis("Horizontal"));
             animator.SetFloat("Vertical", CrossPlatformInputManager.GetAxis("Vertical"));
             if (CrossPlatformInputManager.GetButtonDown("Jump")) {
                 animator.SetTrigger("IsJumping");
+                isOnPlatform = false;
+                platformParent = null;
             }
             animator.SetBool("Running", Input.GetKey(KeyCode.LeftShift));
         }
@@ -120,10 +147,27 @@ public class PlayerNetworkMover : MonoBehaviourPunCallbacks, IPunObservable {
         }
     }
 
+    void OnControllerColliderHit(ControllerColliderHit hit) {
+        if (!photonView.IsMine) return;
+
+        if (hit.gameObject.CompareTag("MovingPlatform")) {
+            // Check if we're standing on the platform (using dot product with up vector)
+            if (Vector3.Dot(hit.normal, Vector3.up) > 0.5f) {
+                Debug.Log("Standing on platform!");
+                platformParent = hit.transform;
+                lastPlatformPosition = platformParent.position;
+                isOnPlatform = true;
+            }
+        }
+    }
+
     private void RespawnPlayer() {
         if (photonView.IsMine) {
+            isOnPlatform = false;
+            platformParent = null;
+            characterController.enabled = false;
             transform.position = spawnPosition;
-            GetComponent<Rigidbody>().velocity = Vector3.zero; // Reset velocity if player has Rigidbody
+            characterController.enabled = true;
         }
     }
 
