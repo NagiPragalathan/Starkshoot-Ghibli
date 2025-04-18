@@ -61,6 +61,14 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     private const float ROOM_LIST_UPDATE_INTERVAL = 3f;
     private Dictionary<string, RoomInfo> cachedRoomList = new Dictionary<string, RoomInfo>();
     private Dictionary<string, int> roomPlayerCounts = new Dictionary<string, int>();
+    private bool isReconnecting = false;
+    private const float RECONNECT_INTERVAL = 2f;
+    private const int MAX_RECONNECT_ATTEMPTS = 5;
+    private int currentReconnectAttempts = 0;
+    private string lastRoomName = null;
+    private bool wasInRoom = false;
+    private const float CONNECTION_CHECK_INTERVAL = 1f;
+    private float connectionCheckTimer = 0f;
 
     // Add this class to track player statistics
     private class PlayerStats {
@@ -110,6 +118,10 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         // Make sure UI is initialized with zero values
         if (scoreText != null) scoreText.text = "Score: 0";
         if (killsText != null) killsText.text = "Kills: 0";
+
+        // Add these lines to handle application focus
+        Application.runInBackground = true;
+        PhotonNetwork.KeepAliveInBackground = 3000; // Keep connection alive for 3 seconds in background
     }
 
     void SetupTimeDropdown() {
@@ -132,8 +144,15 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     /// </summary>
     public override void OnConnectedToMaster() {
         Debug.Log("Connected to Master Server. Joining lobby...");
-        // Always join the default lobby
-        PhotonNetwork.JoinLobby(TypedLobby.Default);
+        
+        if (isReconnecting && wasInRoom && !string.IsNullOrEmpty(lastRoomName)) {
+            // Try to rejoin the previous room
+            Debug.Log($"Attempting to rejoin room: {lastRoomName}");
+            PhotonNetwork.RejoinRoom(lastRoomName);
+        } else {
+            // Normal connection flow
+            PhotonNetwork.JoinLobby(TypedLobby.Default);
+        }
     }
 
     /// <summary>
@@ -142,21 +161,29 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     /// <param name="cause">DisconnectCause data associated with this disconnect.</param>
     public override void OnDisconnected(DisconnectCause cause) {
         Debug.LogWarning($"Disconnected from server: {cause}");
+        
+        // Store room information before disconnect
+        if (PhotonNetwork.InRoom) {
+            lastRoomName = PhotonNetwork.CurrentRoom.Name;
+            wasInRoom = true;
+        }
+
+        // Don't try to reconnect if it was an intended disconnect
+        if (cause != DisconnectCause.DisconnectByClientLogic) {
+            StartCoroutine(TryReconnect());
+        }
+
         if (connectionText != null) {
-            connectionText.text = $"Disconnected: {cause}";
+            connectionText.text = $"Disconnected: {cause}. Attempting to reconnect...";
         }
-        
-        // Reset room list when disconnected
-        if (roomList != null) {
-            roomList.text = "Disconnected from server...";
+
+        // Don't reset the game state immediately
+        if (cause == DisconnectCause.DisconnectByClientLogic) {
+            // Reset game state only if it's an intended disconnect
+            isGameActive = false;
+            Cursor.lockState = CursorLockMode.None;
+            Cursor.visible = true;
         }
-        
-        // Reset game state
-        isGameActive = false;
-        
-        // Show cursor in case of disconnect during game
-        Cursor.lockState = CursorLockMode.None;
-        Cursor.visible = true;
     }
 
     /// <summary>
@@ -305,6 +332,16 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         if (roomPlayerCounts.ContainsKey(roomName)) {
             roomPlayerCounts[roomName] = PhotonNetwork.CurrentRoom.PlayerCount;
             photonView.RPC("UpdateRoomPlayerCount", RpcTarget.All, roomName, PhotonNetwork.CurrentRoom.PlayerCount);
+        }
+
+        if (isReconnecting) {
+            Debug.Log("Successfully rejoined room after reconnection");
+            isReconnecting = false;
+            wasInRoom = false;
+            lastRoomName = null;
+            
+            // Restore player state if needed
+            RestorePlayerState();
         }
     }
 
@@ -502,6 +539,22 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
                 UpdateRoomListDisplay();
             }
         }
+
+        // Add connection monitoring
+        if (PhotonNetwork.IsConnected) {
+            connectionCheckTimer -= Time.deltaTime;
+            if (connectionCheckTimer <= 0f) {
+                connectionCheckTimer = CONNECTION_CHECK_INTERVAL;
+                // Check if we're still properly connected
+                if (PhotonNetwork.NetworkClientState == ClientState.ConnectedToMasterServer ||
+                    PhotonNetwork.NetworkClientState == ClientState.Joined) {
+                    // Connection is healthy
+                    if (connectionText != null) {
+                        connectionText.text = "";
+                    }
+                }
+            }
+        }
     }
 
     [PunRPC]
@@ -679,6 +732,11 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     public override void OnRoomPropertiesUpdate(ExitGames.Client.Photon.Hashtable propertiesThatChanged) {
         base.OnRoomPropertiesUpdate(propertiesThatChanged);
         
+        if (isReconnecting && PhotonNetwork.InRoom) {
+            // Make sure we have the latest room properties after reconnecting
+            UpdateCachedRoomInfo(PhotonNetwork.CurrentRoom.Name, PhotonNetwork.CurrentRoom.CustomProperties);
+        }
+        
         if (PhotonNetwork.InRoom) {
             string roomName = PhotonNetwork.CurrentRoom.Name;
             if (cachedRoomList.ContainsKey(roomName)) {
@@ -792,6 +850,14 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
 
     public override void OnJoinRoomFailed(short returnCode, string message) {
         Debug.LogError($"Failed to join room: {message}");
+        
+        if (isReconnecting && wasInRoom) {
+            // If rejoining failed, clear the stored room info and join the lobby
+            lastRoomName = null;
+            wasInRoom = false;
+            PhotonNetwork.JoinLobby(TypedLobby.Default);
+        }
+        
         connectionText.text = $"Failed to join room: {message}";
         serverWindow.SetActive(true);
     }
@@ -813,6 +879,72 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         if (roomPlayerCounts.ContainsKey(roomName)) {
             roomPlayerCounts[roomName] = playerCount;
             UpdateRoomListDisplay();
+        }
+    }
+
+    // Add this method to handle reconnection attempts
+    private IEnumerator TryReconnect() {
+        isReconnecting = true;
+        currentReconnectAttempts = 0;
+
+        while (!PhotonNetwork.IsConnected && currentReconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+            Debug.Log($"Attempting to reconnect... Attempt {currentReconnectAttempts + 1}/{MAX_RECONNECT_ATTEMPTS}");
+            connectionText.text = $"Reconnecting... Attempt {currentReconnectAttempts + 1}";
+
+            // Try to reconnect
+            PhotonNetwork.ConnectUsingSettings();
+            currentReconnectAttempts++;
+
+            // Wait for the reconnection interval
+            yield return new WaitForSeconds(RECONNECT_INTERVAL);
+        }
+
+        if (!PhotonNetwork.IsConnected) {
+            Debug.LogError("Failed to reconnect after maximum attempts");
+            connectionText.text = "Failed to reconnect. Please restart the game.";
+        }
+
+        isReconnecting = false;
+    }
+
+    // Add method to restore player state after reconnection
+    private void RestorePlayerState() {
+        if (player != null) {
+            // Restore player position, health, etc.
+            PlayerHealth playerHealth = player.GetComponent<PlayerHealth>();
+            if (playerHealth != null) {
+                playerHealth.enabled = true;
+            }
+
+            PlayerNetworkMover playerMover = player.GetComponent<PlayerNetworkMover>();
+            if (playerMover != null) {
+                playerMover.enabled = true;
+            }
+        }
+
+        // Sync game state
+        if (PhotonNetwork.IsMasterClient) {
+            photonView.RPC("SyncTimer", RpcTarget.All, currentGameTime);
+            photonView.RPC("SyncGameState", RpcTarget.All, isGameActive);
+        }
+    }
+
+    // Add OnApplicationPause and OnApplicationFocus handlers
+    void OnApplicationPause(bool isPaused) {
+        if (!isPaused) {
+            // Application resumed
+            if (!PhotonNetwork.IsConnected && !isReconnecting) {
+                StartCoroutine(TryReconnect());
+            }
+        }
+    }
+
+    void OnApplicationFocus(bool hasFocus) {
+        if (hasFocus) {
+            // Application gained focus
+            if (!PhotonNetwork.IsConnected && !isReconnecting) {
+                StartCoroutine(TryReconnect());
+            }
         }
     }
 
