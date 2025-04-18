@@ -23,6 +23,7 @@ public class PlayerNetworkMover : MonoBehaviourPunCallbacks, IPunObservable {
     private Quaternion rotation;
     private bool jump;
     private float smoothing = 10.0f;
+    private Vector3 spawnPosition;
 
     /// <summary>
     /// Move game objects to another layer.
@@ -49,6 +50,9 @@ public class PlayerNetworkMover : MonoBehaviourPunCallbacks, IPunObservable {
     /// any of the Update methods is called the first time.
     /// </summary>
     void Start() {
+        // Store initial spawn position
+        spawnPosition = transform.position;
+        
         if (photonView.IsMine) {
             GetComponent<FirstPersonController>().enabled = true;
             MoveToLayer(gunObject, LayerMask.NameToLayer("Hidden"));
@@ -79,6 +83,11 @@ public class PlayerNetworkMover : MonoBehaviourPunCallbacks, IPunObservable {
         if (!photonView.IsMine) {
             transform.position = Vector3.Lerp(transform.position, position, Time.deltaTime * smoothing);
             transform.rotation = Quaternion.Lerp(transform.rotation, rotation, Time.deltaTime * smoothing);
+        } else {
+            // Check if player has fallen below -150
+            if (transform.position.y < -150f) {
+                RespawnPlayer();
+            }
         }
     }
 
@@ -108,6 +117,13 @@ public class PlayerNetworkMover : MonoBehaviourPunCallbacks, IPunObservable {
         } else {
             position = (Vector3)stream.ReceiveNext();
             rotation = (Quaternion)stream.ReceiveNext();
+        }
+    }
+
+    private void RespawnPlayer() {
+        if (photonView.IsMine) {
+            transform.position = spawnPosition;
+            GetComponent<Rigidbody>().velocity = Vector3.zero; // Reset velocity if player has Rigidbody
         }
     }
 
