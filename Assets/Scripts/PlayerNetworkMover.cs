@@ -19,6 +19,10 @@ public class PlayerNetworkMover : MonoBehaviourPunCallbacks, IPunObservable {
     [SerializeField]
     private NameTag nameTag;
 
+    // Add new spawn points array
+    [SerializeField]
+    private Transform[] spawnPoints;  // Make sure this is assigned in Unity Inspector
+
     private Vector3 position;
     private Quaternion rotation;
     private bool jump;
@@ -55,8 +59,15 @@ public class PlayerNetworkMover : MonoBehaviourPunCallbacks, IPunObservable {
     /// any of the Update methods is called the first time.
     /// </summary>
     void Start() {
-        // Store initial spawn position
-        spawnPosition = transform.position;
+        // Add debug logging to check spawn points
+        if (spawnPoints == null || spawnPoints.Length == 0) {
+            Debug.LogWarning("No spawn points assigned! Please assign spawn points in the Unity Inspector.");
+            spawnPosition = transform.position;
+        } else {
+            Debug.Log($"Found {spawnPoints.Length} spawn points");
+            spawnPosition = spawnPoints[Random.Range(0, spawnPoints.Length)].position;
+            transform.position = spawnPosition;
+        }
         
         if (photonView.IsMine) {
             GetComponent<FirstPersonController>().enabled = true;
@@ -166,7 +177,24 @@ public class PlayerNetworkMover : MonoBehaviourPunCallbacks, IPunObservable {
             isOnPlatform = false;
             platformParent = null;
             characterController.enabled = false;
-            transform.position = spawnPosition;
+            
+            if (spawnPoints == null || spawnPoints.Length == 0) {
+                Debug.LogWarning("No spawn points available for respawn!");
+                transform.position = spawnPosition;
+            } else {
+                // Get a random spawn point that's different from current position
+                int attempts = 0;
+                Vector3 newSpawnPos;
+                do {
+                    int randomIndex = Random.Range(0, spawnPoints.Length);
+                    newSpawnPos = spawnPoints[randomIndex].position;
+                    attempts++;
+                } while (Vector3.Distance(newSpawnPos, transform.position) < 1f && attempts < 10);
+                
+                Debug.Log($"Respawning player at new position: {newSpawnPos}");
+                transform.position = newSpawnPos;
+            }
+            
             characterController.enabled = true;
         }
     }
