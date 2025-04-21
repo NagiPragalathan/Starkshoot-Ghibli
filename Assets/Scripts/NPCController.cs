@@ -9,10 +9,10 @@ using System.Collections.Generic;
 public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
 {
     [Header("Movement Settings")]
-    [SerializeField] private float moveSpeed = 5f;
+    [SerializeField] private float moveSpeed = 3.5f;
     [SerializeField] private float patrolRadius = 20f;
-    [SerializeField] private float minWaitTime = 2f;
-    [SerializeField] private float maxWaitTime = 5f;
+    [SerializeField] private float minWaitTime = 1f;
+    [SerializeField] private float maxWaitTime = 3f;
 
     [Header("Combat Settings")]
     [SerializeField] private float detectionRange = 30f;
@@ -28,140 +28,178 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
     private Vector3 startPosition;
     private bool isDead = false;
     private float nextAttackTime;
-    private PlayerHealth playerHealth;
-    private Transform gunTransform;
-    private Rigidbody rb;
-    private Vector3 networkPosition;
-    private Quaternion networkRotation;
+    private bool isMoving = false;
+    private bool isInitialized = false;
+    private int npcViewID;
 
-    // Animation parameter names - match the player's animator parameters
-    private readonly string ANIM_HORIZONTAL = "Horizontal";
-    private readonly string ANIM_VERTICAL = "Vertical";
-    private readonly string ANIM_IS_RUNNING = "Running";
-    private readonly string ANIM_IS_JUMPING = "IsJumping";
-    private readonly string ANIM_IS_HURT = "IsHurt";
-    private readonly string ANIM_IS_DEAD = "IsDead";
+    // Animation parameter hashes (faster than strings)
+    private int hashHorizontal;
+    private int hashVertical;
+    private int hashRunning;
+    private int hashIsDead;
+    private int hashIsHurt;
+    private int hashDieTrigger;
+    private int hashShootTrigger;
 
     private void Awake()
     {
         // Get components
         agent = GetComponent<NavMeshAgent>();
+        photonView = GetComponent<PhotonView>();
+        npcHealth = GetComponent<NPCHealth>();
+        npcViewID = photonView.ViewID;
+        
+        // Get or find animator
         animator = GetComponent<Animator>();
         if (animator == null)
         {
             animator = GetComponentInChildren<Animator>();
-            Debug.Log("Found animator in children");
-        }
-        
-        if (animator != null)
-        {
-            Debug.Log("NPC Animator found. Checking parameters:");
-            foreach (AnimatorControllerParameter param in animator.parameters)
+            if (animator == null)
             {
-                Debug.Log($"Parameter: {param.name} of type {param.type}");
+                Debug.LogError($"NPC {npcViewID} cannot find Animator component!");
             }
         }
-        else
-        {
-            Debug.LogError("No animator found on NPC or its children!");
-        }
         
-        photonView = GetComponent<PhotonView>();
-        npcHealth = GetComponent<NPCHealth>();
-        rb = GetComponent<Rigidbody>();
-        playerHealth = GetComponent<PlayerHealth>();
+        // Cache animation parameter hashes for better performance
+        hashHorizontal = Animator.StringToHash("Horizontal");
+        hashVertical = Animator.StringToHash("Vertical");
+        hashRunning = Animator.StringToHash("Running");
+        hashIsDead = Animator.StringToHash("IsDead");
+        hashIsHurt = Animator.StringToHash("IsHurt");
+        hashDieTrigger = Animator.StringToHash("Die");
+        hashShootTrigger = Animator.StringToHash("Shoot");
         
         // Store starting position
         startPosition = transform.position;
 
-        // Configure NavMeshAgent
+        // Set proper scale (1.5x is larger than player)
+        transform.localScale = new Vector3(1.5f, 1.5f, 1.5f);
+        
+        Debug.Log($"NPC {npcViewID} initialized with animator: {(animator != null ? "Found" : "Missing")}");
+    }
+
+    private void Start()
+    {
+        if (!isInitialized)
+        {
+            InitializeNPC();
+        }
+    }
+
+    public void InitializeNPC()
+    {
+        // Configure NavMeshAgent for proper movement
         if (agent != null)
         {
             agent.speed = moveSpeed;
             agent.stoppingDistance = 1f;
             agent.autoBraking = true;
+            agent.acceleration = 12f;
+            agent.angularSpeed = 180f;
+            agent.avoidancePriority = Random.Range(20, 80); // Different priorities to avoid stacking
+            
+            // Ensure agent is on the NavMesh
+            NavMeshHit hit;
+            if (NavMesh.SamplePosition(transform.position, out hit, 1.0f, NavMesh.AllAreas))
+            {
+                agent.Warp(hit.position);
+            }
         }
-
-        // Configure Rigidbody for NPC
-        if (rb != null)
+        
+        // Initialize animator parameters
+        if (animator != null)
         {
-            rb.isKinematic = true; // Let NavMeshAgent handle movement
-            rb.useGravity = true;
+            animator.SetFloat(hashHorizontal, 0f);
+            animator.SetFloat(hashVertical, 0f);
+            animator.SetBool(hashRunning, false);
+            animator.SetBool(hashIsDead, false);
+            
+            // Force animation update
+            animator.Rebind();
+            animator.Update(0f);
+            Debug.Log($"NPC {npcViewID} animator initialized");
         }
-
-        networkPosition = transform.position;
-        networkRotation = transform.rotation;
-
-        // Subscribe to health events
-        if (npcHealth != null)
-        {
-            npcHealth.OnDamageReceived += HandleDamage;
-            npcHealth.OnDeath += HandleDeath;
-        }
-
-        // Subscribe to player health events
-        if (playerHealth != null)
-        {
-            playerHealth.RespawnEvent += OnNPCDeath;
-        }
-    }
-
-    private void Start()
-    {
+        
+        // For master client, start AI routines
         if (PhotonNetwork.IsMasterClient)
         {
-            VerifyAnimatorSetup();
             StartCoroutine(AIRoutine());
+            StartCoroutine(FindPlayerRoutine());
         }
+        
+        isInitialized = true;
+        Debug.Log($"NPC {npcViewID} fully initialized. Is Master: {PhotonNetwork.IsMasterClient}");
     }
 
     private void Update()
     {
-        // Only update animations and movement on MasterClient
-        if (!PhotonNetwork.IsMasterClient || isDead) return;
+        if (isDead) return;
 
-        // Update animation based on movement
-        if (animator != null && agent != null)
+        // Master client controls the NPC movement and behavior
+        if (PhotonNetwork.IsMasterClient)
         {
-            // Calculate movement direction and speed
-            Vector3 velocity = agent.velocity;
-            float speed = velocity.magnitude;
-            
-            // Convert world space velocity to local space direction
-            Vector3 localVelocity = transform.InverseTransformDirection(velocity);
-            float forward = localVelocity.z;
-            float sideways = localVelocity.x;
+            // Update animation based on movement
+            if (animator != null && agent != null)
+            {
+                Vector3 velocity = agent.velocity;
+                float speed = velocity.magnitude;
+                
+                Vector3 localVelocity = transform.InverseTransformDirection(velocity);
+                float forward = localVelocity.z;
+                float sideways = localVelocity.x;
 
-            // Set animator parameters to match player's animation system
-            photonView.RPC("SyncAnimationParameters", RpcTarget.All, 
-                sideways / agent.speed,
-                forward / agent.speed,
-                speed > agent.speed * 0.5f);
+                // Set animator parameters locally
+                animator.SetFloat(hashHorizontal, sideways / agent.speed);
+                animator.SetFloat(hashVertical, forward / agent.speed);
+                animator.SetBool(hashRunning, speed > 0.1f);
+                
+                // Update movement status
+                isMoving = speed > 0.1f;
+                
+                // Sync animation parameters
+                if (photonView.IsMine)
+                {
+                    photonView.RPC("SyncAnimationParameters", RpcTarget.Others, 
+                        sideways / agent.speed, 
+                        forward / agent.speed, 
+                        speed > 0.1f);
+                }
+            }
         }
-
-        // Look for nearby players
-        FindAndAttackPlayer();
     }
 
     private IEnumerator AIRoutine()
     {
+        Debug.Log($"NPC {npcViewID} started AI routine");
+        
+        // Small initial delay to ensure everything is set up
+        yield return new WaitForSeconds(Random.Range(0.1f, 0.5f));
+        
         while (!isDead)
         {
-            if (!agent.pathStatus.Equals(NavMeshPathStatus.PathInvalid))
+            if (agent != null && agent.isOnNavMesh && !isMoving)
             {
                 // Generate random position within patrol radius
                 Vector3 randomPos = startPosition + Random.insideUnitSphere * patrolRadius;
                 NavMeshHit hit;
                 if (NavMesh.SamplePosition(randomPos, out hit, patrolRadius, NavMesh.AllAreas))
                 {
-                    // Set destination
+                    // Set destination and mark as moving
                     agent.SetDestination(hit.position);
-
+                    isMoving = true;
+                    Debug.Log($"NPC {npcViewID} moving to: {hit.position}");
+                    
                     // Wait until we reach the destination or get close enough
-                    while (agent.pathStatus == NavMeshPathStatus.PathPartial)
+                    float timeout = 0;
+                    while (agent.pathPending || 
+                          (agent.hasPath && agent.remainingDistance > agent.stoppingDistance) && 
+                          timeout < 10f)
                     {
+                        timeout += 0.1f;
                         yield return new WaitForSeconds(0.1f);
                     }
+                    
+                    isMoving = false;
                 }
             }
 
@@ -170,16 +208,28 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
             yield return new WaitForSeconds(waitTime);
         }
     }
+    
+    private IEnumerator FindPlayerRoutine()
+    {
+        while (!isDead)
+        {
+            FindAndAttackPlayer();
+            yield return new WaitForSeconds(0.5f);
+        }
+    }
 
     private void FindAndAttackPlayer()
     {
         if (Time.time < nextAttackTime) return;
 
         Collider[] colliders = Physics.OverlapSphere(transform.position, detectionRange);
+        bool foundPlayer = false;
+        
         foreach (Collider col in colliders)
         {
             if (col.CompareTag("Player"))
             {
+                foundPlayer = true;
                 float distance = Vector3.Distance(transform.position, col.transform.position);
                 
                 // If player is within attack range
@@ -198,18 +248,22 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
                 else if (distance <= detectionRange)
                 {
                     agent.SetDestination(col.transform.position);
+                    isMoving = true;
                 }
             }
+        }
+        
+        // If no player found, and we were previously chasing, resume patrol
+        if (!foundPlayer && isMoving && !agent.hasPath)
+        {
+            isMoving = false;
         }
     }
 
     private void Attack(GameObject player)
     {
-        // Play attack animation
-        if (animator != null)
-        {
-            animator.SetTrigger(ANIM_IS_HURT);
-        }
+        // Play attack/shoot animation
+        photonView.RPC("PlayShootAnimation", RpcTarget.All);
 
         // Apply damage to player
         PlayerHealth playerHealth = player.GetComponent<PlayerHealth>();
@@ -219,97 +273,42 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
         }
     }
 
-    private void HandleDamage()
+    [PunRPC]
+    private void PlayShootAnimation()
     {
-        if (isDead) return;
-
         if (animator != null)
         {
-            animator.SetTrigger(ANIM_IS_HURT);
+            animator.SetTrigger(hashShootTrigger);
         }
     }
-
-    private void HandleDeath()
+    
+    [PunRPC]
+    private void PlayHurtAnimation()
     {
-        if (isDead) return;
-        isDead = true;
-
-        Debug.Log("NPC Death - Playing death animation");
-
-        // Stop movement
-        if (agent != null)
-        {
-            agent.isStopped = true;
-            agent.enabled = false;
-        }
-
-        // Disable NPC controller behaviors
-        enabled = false;
-
-        // Play death animation
         if (animator != null)
         {
-            // Reset other animation parameters
-            animator.SetFloat(ANIM_HORIZONTAL, 0f);
-            animator.SetFloat(ANIM_VERTICAL, 0f);
-            animator.SetBool(ANIM_IS_RUNNING, false);
-            
-            // Trigger death animation
-            animator.SetBool(ANIM_IS_DEAD, true);
-            animator.SetTrigger("Die");
-            
-            Debug.Log("Death animation triggered");
-        }
-
-        // Disable colliders
-        foreach (Collider col in GetComponents<Collider>())
-        {
-            col.enabled = false;
-        }
-
-        // Make rigidbody kinematic to prevent physics interactions
-        Rigidbody rb = GetComponent<Rigidbody>();
-        if (rb != null)
-        {
-            rb.isKinematic = true;
-        }
-
-        // Start sinking after a delay
-        StartCoroutine(StartSinking());
-
-        // Start destruction sequence
-        if (PhotonNetwork.IsMasterClient)
-        {
-            StartCoroutine(DestroyAfterDelay());
+            animator.SetTrigger(hashIsHurt);
         }
     }
-
-    private IEnumerator StartSinking()
+    
+    [PunRPC]
+    private void PlayDeathAnimation()
     {
-        yield return new WaitForSeconds(2f); // Wait for death animation to play
-        
-        float sinkDuration = 2f;
-        float elapsedTime = 0f;
-        Vector3 startPos = transform.position;
-        Vector3 endPos = startPos + Vector3.down * 2f; // Sink 2 units down
-
-        while (elapsedTime < sinkDuration)
+        if (animator != null)
         {
-            elapsedTime += Time.deltaTime;
-            float t = elapsedTime / sinkDuration;
-            transform.position = Vector3.Lerp(startPos, endPos, t);
-            yield return null;
+            animator.SetBool(hashIsDead, true);
+            animator.SetTrigger(hashDieTrigger);
         }
     }
-
-    private IEnumerator DestroyAfterDelay()
+    
+    [PunRPC]
+    private void SyncAnimationParameters(float horizontal, float vertical, bool isRunning)
     {
-        // Wait for death animation and sinking to complete
-        yield return new WaitForSeconds(5f);
-        
-        if (PhotonNetwork.IsMasterClient)
+        if (animator != null)
         {
-            PhotonNetwork.Destroy(gameObject);
+            animator.SetFloat(hashHorizontal, horizontal);
+            animator.SetFloat(hashVertical, vertical);
+            animator.SetBool(hashRunning, isRunning);
         }
     }
 
@@ -317,76 +316,96 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
     {
         if (stream.IsWriting)
         {
-            // Send position, rotation, and velocity
+            // Master client sends data
             stream.SendNext(transform.position);
             stream.SendNext(transform.rotation);
-            stream.SendNext(agent != null ? agent.velocity : Vector3.zero);
-            stream.SendNext(agent != null ? agent.destination : transform.position);
+            
+            // Send animation parameters
+            if (animator != null)
+            {
+                stream.SendNext(animator.GetFloat(hashHorizontal));
+                stream.SendNext(animator.GetFloat(hashVertical));
+                stream.SendNext(animator.GetBool(hashRunning));
+            }
+            else
+            {
+                stream.SendNext(0f);
+                stream.SendNext(0f);
+                stream.SendNext(false);
+            }
+            
+            stream.SendNext(isDead);
+            stream.SendNext(isMoving);
+            
+            // Send agent data if available
+            if (agent != null && agent.isOnNavMesh)
+            {
+                stream.SendNext(agent.destination);
+                stream.SendNext(agent.velocity.magnitude);
+            }
+            else
+            {
+                stream.SendNext(transform.position);
+                stream.SendNext(0f);
+            }
         }
         else
         {
-            // Receive position, rotation, and velocity
-            networkPosition = (Vector3)stream.ReceiveNext();
-            networkRotation = (Quaternion)stream.ReceiveNext();
-            Vector3 receivedVelocity = (Vector3)stream.ReceiveNext();
-            Vector3 receivedDestination = (Vector3)stream.ReceiveNext();
-
-            // Apply received values to non-MasterClient NPCs
-            if (!PhotonNetwork.IsMasterClient)
+            // Clients receive data
+            Vector3 networkPosition = (Vector3)stream.ReceiveNext();
+            Quaternion networkRotation = (Quaternion)stream.ReceiveNext();
+            
+            // Receive animation parameters
+            float networkHorizontal = (float)stream.ReceiveNext();
+            float networkVertical = (float)stream.ReceiveNext();
+            bool networkIsRunning = (bool)stream.ReceiveNext();
+            
+            // Other state data
+            isDead = (bool)stream.ReceiveNext();
+            isMoving = (bool)stream.ReceiveNext();
+            
+            // Agent data
+            Vector3 networkDestination = (Vector3)stream.ReceiveNext();
+            float networkSpeed = (float)stream.ReceiveNext();
+            
+            // Update client-side animation
+            if (animator != null)
             {
-                // Smoothly move to the network position
-                transform.position = Vector3.Lerp(transform.position, networkPosition, Time.deltaTime * 10f);
-                transform.rotation = Quaternion.Lerp(transform.rotation, networkRotation, Time.deltaTime * 10f);
-
-                // Update NavMeshAgent if available
-                if (agent != null && agent.enabled)
+                animator.SetFloat(hashHorizontal, networkHorizontal);
+                animator.SetFloat(hashVertical, networkVertical);
+                animator.SetBool(hashRunning, networkIsRunning);
+            }
+            
+            // Update position and rotation
+            transform.position = Vector3.Lerp(transform.position, networkPosition, Time.deltaTime * 10f);
+            transform.rotation = Quaternion.Lerp(transform.rotation, networkRotation, Time.deltaTime * 10f);
+            
+            // Update agent on client if available
+            if (agent != null && agent.isOnNavMesh)
+            {
+                // Update agent's position
+                agent.nextPosition = transform.position;
+                
+                // Update destination if it's different
+                if (Vector3.Distance(agent.destination, networkDestination) > 1f)
                 {
-                    agent.velocity = receivedVelocity;
-                    if (Vector3.Distance(agent.destination, receivedDestination) > 0.1f)
-                    {
-                        agent.destination = receivedDestination;
-                    }
+                    agent.SetDestination(networkDestination);
                 }
+                
+                // Match the agent's speed
+                agent.speed = networkSpeed;
             }
         }
     }
 
-    private void VerifyAnimatorSetup()
+    // Handle damage and death
+    public void HandleDamage()
     {
-        if (animator == null)
-        {
-            Debug.LogError("No Animator component found!");
-            return;
-        }
-
-        Debug.Log("Checking NPC animator parameters:");
-        bool hasHorizontal = false;
-        bool hasVertical = false;
-        bool hasRunning = false;
-        bool hasJumping = false;
-        bool hasHurt = false;
-        bool hasDead = false;
-
-        foreach (AnimatorControllerParameter param in animator.parameters)
-        {
-            Debug.Log($"Found parameter: {param.name} ({param.type})");
-            if (param.name == ANIM_HORIZONTAL) hasHorizontal = true;
-            if (param.name == ANIM_VERTICAL) hasVertical = true;
-            if (param.name == ANIM_IS_RUNNING) hasRunning = true;
-            if (param.name == ANIM_IS_JUMPING) hasJumping = true;
-            if (param.name == ANIM_IS_HURT) hasHurt = true;
-            if (param.name == ANIM_IS_DEAD) hasDead = true;
-        }
-
-        if (!hasHorizontal) Debug.LogError($"Missing {ANIM_HORIZONTAL} parameter");
-        if (!hasVertical) Debug.LogError($"Missing {ANIM_VERTICAL} parameter");
-        if (!hasRunning) Debug.LogError($"Missing {ANIM_IS_RUNNING} parameter");
-        if (!hasJumping) Debug.LogError($"Missing {ANIM_IS_JUMPING} parameter");
-        if (!hasHurt) Debug.LogError($"Missing {ANIM_IS_HURT} parameter");
-        if (!hasDead) Debug.LogError($"Missing {ANIM_IS_DEAD} parameter");
+        if (isDead) return;
+        photonView.RPC("PlayHurtAnimation", RpcTarget.All);
     }
 
-    void OnNPCDeath(float respawnTime)
+    public void HandleDeath()
     {
         if (isDead) return;
         isDead = true;
@@ -398,67 +417,10 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
             agent.enabled = false;
         }
 
+        // Stop all coroutines
+        StopAllCoroutines();
+        
         // Play death animation
-        if (animator != null)
-        {
-            animator.SetTrigger("Die");
-        }
-
-        // Disable colliders
-        foreach (Collider col in GetComponents<Collider>())
-        {
-            col.enabled = false;
-        }
-
-        // Start destruction sequence
-        if (PhotonNetwork.IsMasterClient)
-        {
-            StartCoroutine(DestroyAfterDelay());
-        }
-    }
-
-    private void OnDrawGizmosSelected()
-    {
-        // Draw detection range
-        Gizmos.color = Color.yellow;
-        Gizmos.DrawWireSphere(transform.position, detectionRange);
-
-        // Draw attack range
-        Gizmos.color = Color.red;
-        Gizmos.DrawWireSphere(transform.position, attackRange);
-
-        // Draw patrol radius
-        Gizmos.color = Color.blue;
-        Gizmos.DrawWireSphere(startPosition, patrolRadius);
-    }
-
-    [PunRPC]
-    private void SyncAnimationParameters(float horizontal, float vertical, bool isRunning)
-    {
-        if (animator != null)
-        {
-            animator.SetFloat(ANIM_HORIZONTAL, horizontal);
-            animator.SetFloat(ANIM_VERTICAL, vertical);
-            animator.SetBool(ANIM_IS_RUNNING, isRunning);
-        }
-    }
-
-    [PunRPC]
-    private void PlayAttackAnimation()
-    {
-        if (animator != null)
-        {
-            animator.SetTrigger(ANIM_IS_HURT);
-        }
-    }
-
-    [PunRPC]
-    private void PlayDeathAnimation()
-    {
-        if (animator != null)
-        {
-            animator.SetBool(ANIM_IS_DEAD, true);
-            animator.SetTrigger("Die");
-        }
+        photonView.RPC("PlayDeathAnimation", RpcTarget.All);
     }
 }

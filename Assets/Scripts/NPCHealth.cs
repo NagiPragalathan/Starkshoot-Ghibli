@@ -104,14 +104,9 @@ public class NPCHealth : MonoBehaviourPunCallbacks, IPunObservable
         networkManager = FindObjectOfType<NetworkManager>();
         npcController = GetComponent<NPCController>();
         
-        currentHealth = startingHealth;
-        isDead = false;
-        isSinking = false;
-
+        ResetHealth();
+        
         Debug.Log($"NPC Health initialized with {currentHealth} HP. PhotonView ID: {photonView.ViewID}");
-
-        // Adjust the model scale if it's too small
-        transform.localScale = new Vector3(1.5f, 1.5f, 1.5f); // Adjust these values as needed
     }
 
     void Update()
@@ -163,10 +158,19 @@ public class NPCHealth : MonoBehaviourPunCallbacks, IPunObservable
         // Invoke damage event
         OnDamageReceived?.Invoke();
 
-        // Play hurt animation
-        if (animator != null)
+        // Get NPC controller to handle animation
+        NPCController controller = GetComponent<NPCController>();
+        if (controller != null)
         {
-            animator.SetTrigger("IsHurt");
+            controller.HandleDamage();
+        }
+        else
+        {
+            // Fallback if controller not found
+            if (animator != null)
+            {
+                animator.SetTrigger("IsHurt");
+            }
         }
 
         // Play hurt sound
@@ -185,10 +189,23 @@ public class NPCHealth : MonoBehaviourPunCallbacks, IPunObservable
 
         Debug.Log($"NPC {BotName} died, killed by: {killerName}");
 
-        // Disable NPC Controller
-        if (npcController != null)
+        // Store death position for respawn
+        Vector3 deathPosition = transform.position;
+
+        // Get NPC controller to handle animation
+        NPCController controller = GetComponent<NPCController>();
+        if (controller != null)
         {
-            npcController.enabled = false;
+            controller.HandleDeath();
+        }
+        else
+        {
+            // Fallback if controller not found
+            if (animator != null)
+            {
+                animator.SetBool("IsDead", true);
+                animator.SetTrigger("Die");
+            }
         }
 
         // Disable NavMeshAgent
@@ -198,13 +215,6 @@ public class NPCHealth : MonoBehaviourPunCallbacks, IPunObservable
             agent.enabled = false;
         }
 
-        // Play death animation
-        if (animator != null)
-        {
-            animator.SetBool("IsDead", true);
-            animator.SetTrigger("Die");
-        }
-
         // Play death sound
         if (audioSource != null && deathClip != null)
         {
@@ -212,12 +222,22 @@ public class NPCHealth : MonoBehaviourPunCallbacks, IPunObservable
             audioSource.Play();
         }
 
-        // Update killer's stats
-        if (PhotonNetwork.IsMasterClient)
+        // Update killer's stats and trigger respawn
+        if (networkManager == null)
         {
-            if (networkManager != null)
+            networkManager = FindObjectOfType<NetworkManager>();
+        }
+        
+        if (networkManager != null)
+        {
+            // Award kill to the killer
+            if (PhotonNetwork.IsMasterClient)
             {
                 networkManager.photonView.RPC("AddBotKill_RPC", RpcTarget.All, killerName, BotName);
+                
+                // Request NPC respawn directly - only master client should do this
+                Debug.Log($"Requesting respawn for NPC: {BotName}");
+                networkManager.RequestNPCRespawn(deathPosition);
             }
         }
 
@@ -250,9 +270,13 @@ public class NPCHealth : MonoBehaviourPunCallbacks, IPunObservable
 
     private IEnumerator DestroyAfterDelay()
     {
+        Debug.Log($"NPC {BotName} will be destroyed in {respawnTime} seconds");
         yield return new WaitForSeconds(respawnTime);
+        
+        // Only destroy if we're still the master client
         if (PhotonNetwork.IsMasterClient)
         {
+            Debug.Log($"Destroying NPC {BotName} with ViewID: {photonView.ViewID}");
             PhotonNetwork.Destroy(gameObject);
         }
     }
@@ -321,7 +345,7 @@ public class NPCHealth : MonoBehaviourPunCallbacks, IPunObservable
         // Create a new GameObject for the name tag
         GameObject nameTagObj = new GameObject("BotNameTag");
         nameTagObj.transform.SetParent(transform);
-        nameTagObj.transform.localPosition = new Vector3(0, nameTagHeight, 0);
+        nameTagObj.transform.localPosition = new Vector3(0, nameTagHeight * 1.5f, 0); // Adjust height for larger model
         nameTagObj.transform.localScale = new Vector3(nameTagScale, nameTagScale, nameTagScale);
         
         // Add TextMesh component
@@ -361,5 +385,42 @@ public class NPCHealth : MonoBehaviourPunCallbacks, IPunObservable
     void LateUpdate()
     {
         UpdateNameTagVisibility();
+    }
+
+    public void ResetHealth()
+    {
+        currentHealth = startingHealth;
+        isDead = false;
+        isSinking = false;
+        
+        // Re-enable components
+        var colliders = GetComponents<Collider>();
+        foreach (var col in colliders)
+        {
+            col.enabled = true;
+        }
+        
+        // Reset animator
+        if (animator != null)
+        {
+            animator.SetBool("IsDead", false);
+            animator.SetBool("IsHurt", false);
+        }
+        
+        // Re-enable NavMeshAgent
+        NavMeshAgent agent = GetComponent<NavMeshAgent>();
+        if (agent != null)
+        {
+            agent.enabled = true;
+            agent.isStopped = false;
+        }
+        
+        // Re-enable NPCController
+        NPCController controller = GetComponent<NPCController>();
+        if (controller != null)
+        {
+            controller.enabled = true;
+            controller.InitializeNPC();
+        }
     }
 }

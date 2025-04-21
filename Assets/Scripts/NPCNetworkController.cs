@@ -8,62 +8,85 @@ public class NPCNetworkController : MonoBehaviourPunCallbacks, IPunObservable
 {
     private NavMeshAgent agent;
     private PhotonView photonView;
+    private Animator animator;
     private Vector3 networkPosition;
     private Quaternion networkRotation;
-    private Vector3 targetPosition;
-    private float lastNetworkPositionUpdate;
-    private const float NETWORK_SMOOTHING = 10f;
-    private const float POSITION_THRESHOLD = 0.5f;
+    private Vector3 networkVelocity;
+    private Vector3 networkDestination;
+    private bool networkIsDead;
+    private float networkHorizontal;
+    private float networkVertical;
+    private bool networkIsRunning;
+    private int uniqueID;
+
+    private const float SYNC_RATE = 5f; // times per second
+    private float nextSyncTime = 0f;
 
     void Awake()
     {
         agent = GetComponent<NavMeshAgent>();
         photonView = GetComponent<PhotonView>();
+        uniqueID = photonView.ViewID;
+        
+        // Get animator from this object or children
+        animator = GetComponent<Animator>();
+        if (animator == null)
+        {
+            animator = GetComponentInChildren<Animator>();
+        }
         
         // Initialize network variables
         networkPosition = transform.position;
         networkRotation = transform.rotation;
-        targetPosition = transform.position;
-        lastNetworkPositionUpdate = Time.time;
+        networkDestination = transform.position;
+    }
 
-        // Configure NavMeshAgent for network play
-        if (!PhotonNetwork.IsMasterClient)
+    void Start()
+    {
+        // Set initial agent values
+        if (agent != null)
         {
-            agent.updatePosition = false;
-            agent.updateRotation = false;
+            agent.avoidancePriority = Random.Range(20, 80); // Different priorities to avoid stacking
+            
+            // Client-side NPCs should not update position directly
+            if (!PhotonNetwork.IsMasterClient)
+            {
+                agent.updatePosition = false;
+                agent.updateRotation = false;
+            }
         }
+        
+        Debug.Log($"NPC {uniqueID} network controller initialized. Is master: {PhotonNetwork.IsMasterClient}");
     }
 
     void Update()
     {
-        if (PhotonNetwork.IsMasterClient)
+        // Only update on clients
+        if (!PhotonNetwork.IsMasterClient)
         {
-            // Master client handles actual pathfinding and movement
-            if (agent.isOnNavMesh && !agent.hasPath)
+            // Smoothly update position and rotation
+            transform.position = Vector3.Lerp(transform.position, networkPosition, Time.deltaTime * 10f);
+            transform.rotation = Quaternion.Lerp(transform.rotation, networkRotation, Time.deltaTime * 10f);
+            
+            // Update animation parameters
+            if (animator != null)
             {
-                SetNewRandomDestination();
+                animator.SetFloat("Horizontal", networkHorizontal);
+                animator.SetFloat("Vertical", networkVertical);
+                animator.SetBool("Running", networkIsRunning);
             }
-        }
-        else
-        {
-            // Clients interpolate to the network position
-            if (!agent.isOnNavMesh) return;
-
-            transform.position = Vector3.Lerp(transform.position, networkPosition, Time.deltaTime * NETWORK_SMOOTHING);
-            transform.rotation = Quaternion.Lerp(transform.rotation, networkRotation, Time.deltaTime * NETWORK_SMOOTHING);
-        }
-    }
-
-    void SetNewRandomDestination()
-    {
-        // Get a random point on the NavMesh
-        Vector3 randomDirection = Random.insideUnitSphere * 20f;
-        randomDirection += transform.position;
-        NavMeshHit hit;
-        if (NavMesh.SamplePosition(randomDirection, out hit, 20f, NavMesh.AllAreas))
-        {
-            targetPosition = hit.position;
-            agent.SetDestination(targetPosition);
+            
+            // Update agent position
+            if (agent != null && agent.isOnNavMesh)
+            {
+                agent.nextPosition = transform.position;
+                
+                // Only update destination if it's significantly different to avoid jitter
+                if (Vector3.Distance(agent.destination, networkDestination) > 1f)
+                {
+                    agent.destination = networkDestination;
+                }
+            }
         }
     }
 
@@ -71,26 +94,41 @@ public class NPCNetworkController : MonoBehaviourPunCallbacks, IPunObservable
     {
         if (stream.IsWriting)
         {
-            // Send position, rotation, and target
+            // Send data (from MasterClient to others)
             stream.SendNext(transform.position);
             stream.SendNext(transform.rotation);
-            stream.SendNext(targetPosition);
+            stream.SendNext(agent != null ? agent.velocity : Vector3.zero);
+            stream.SendNext(agent != null ? agent.destination : transform.position);
+            
+            // Send animation data
+            if (animator != null)
+            {
+                stream.SendNext(animator.GetFloat("Horizontal"));
+                stream.SendNext(animator.GetFloat("Vertical"));
+                stream.SendNext(animator.GetBool("Running"));
+            }
+            else
+            {
+                stream.SendNext(0f);
+                stream.SendNext(0f);
+                stream.SendNext(false);
+            }
         }
         else
         {
-            // Receive position, rotation, and target
+            // Receive data (on non-MasterClient)
             networkPosition = (Vector3)stream.ReceiveNext();
             networkRotation = (Quaternion)stream.ReceiveNext();
-            targetPosition = (Vector3)stream.ReceiveNext();
+            networkVelocity = (Vector3)stream.ReceiveNext();
+            networkDestination = (Vector3)stream.ReceiveNext();
             
-            // Update the last network position time
-            lastNetworkPositionUpdate = Time.time;
-
-            // Update the agent's destination if we're not the master
-            if (!PhotonNetwork.IsMasterClient && agent.isOnNavMesh)
-            {
-                agent.SetDestination(targetPosition);
-            }
+            // Receive animation data
+            networkHorizontal = (float)stream.ReceiveNext();
+            networkVertical = (float)stream.ReceiveNext();
+            networkIsRunning = (bool)stream.ReceiveNext();
+            
+            // Debug info
+            Debug.Log($"NPC {uniqueID} received network update: Pos={networkPosition}, Dest={networkDestination}");
         }
     }
 }

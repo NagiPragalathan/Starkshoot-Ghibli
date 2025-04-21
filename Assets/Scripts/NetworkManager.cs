@@ -577,6 +577,12 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
                 }
             }
         }
+
+        // Check NPC count periodically (every 5 seconds)
+        if (PhotonNetwork.IsMasterClient && Time.frameCount % 300 == 0) // 300 frames ≈ 5 seconds at 60 FPS
+        {
+            MaintainNPCCount();
+        }
     }
 
     [PunRPC]
@@ -983,74 +989,154 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             spawnPosition = hit.position;
         }
         
-        // Instantiate the NPC using the NPC prefab
+        // Ensure spawn points are far enough apart
+        GameObject[] existingNPCs = GameObject.FindGameObjectsWithTag("NPC");
+        foreach (GameObject existingNPC in existingNPCs)
+        {
+            if (Vector3.Distance(existingNPC.transform.position, spawnPosition) < 3f)
+            {
+                // Try a different spawn point
+                spawnIndex = (spawnIndex + 1) % spawnPoints.Length;
+                spawnPosition = spawnPoints[spawnIndex].position;
+                break;
+            }
+        }
+        
+        // Instantiate the NPC
         GameObject npc = PhotonNetwork.Instantiate(npcPrefab.name, spawnPosition, spawnRotation, 0);
         
         if (npc != null)
         {
-            // Set the proper scale for the NPC
-            npc.transform.localScale = new Vector3(1.5f, 1.5f, 1.5f); // Adjust these values as needed
-            
-            // Set up NPC-specific components
-            npc.tag = "NPC";
-            npc.layer = LayerMask.NameToLayer("Shootable");
-            
-            // Add and setup the network controller
-            NPCNetworkController networkController = npc.GetComponent<NPCNetworkController>();
-            if (networkController == null)
-            {
-                networkController = npc.AddComponent<NPCNetworkController>();
-            }
-            
-            PhotonView photonView = npc.GetComponent<PhotonView>();
-            if (photonView != null)
-            {
-                // Make sure both controllers are observed
-                if (!photonView.ObservedComponents.Contains(networkController))
-                {
-                    photonView.ObservedComponents.Add(networkController);
-                }
-                
-                // Set synchronization mode
-                photonView.Synchronization = ViewSynchronization.UnreliableOnChange;
-                photonView.ObservedComponents = new List<Component> { networkController };
-            }
-            
-            // Configure the NPC's collider to match the new scale
-            CapsuleCollider collider = npc.GetComponent<CapsuleCollider>();
-            if (collider != null)
-            {
-                collider.height = 2f; // Adjust based on your model
-                collider.radius = 0.5f; // Adjust based on your model
-                collider.center = new Vector3(0, 1f, 0); // Adjust to match model center
-            }
-
-            // Adjust NavMeshAgent settings for the new scale
-            NavMeshAgent agent = npc.GetComponent<NavMeshAgent>();
-            if (agent != null)
-            {
-                agent.height = 2f; // Match collider height
-                agent.radius = 0.5f; // Match collider radius
-                agent.baseOffset = 0f; // Adjust if needed to ensure NPC is on ground
-            }
-
-            // Make sure NPCHealth component is present
-            NPCHealth npcHealth = npc.GetComponent<NPCHealth>();
-            if (npcHealth == null)
-            {
-                npcHealth = npc.AddComponent<NPCHealth>();
-            }
-            
-            // The name will be set through the NPCHealth Awake method
-            
-            // Clear any processed kills for this new NPC
-            if (npcHealth != null && !string.IsNullOrEmpty(npcHealth.BotName))
-            {
-                processedKills.RemoveWhere(k => k.StartsWith(npcHealth.BotName + "_"));
-            }
+            PhotonView pv = npc.GetComponent<PhotonView>();
+            Debug.Log($"NPC spawned with ViewID: {pv.ViewID} at position {spawnPosition}");
+            SetupNPC(npc);
         }
         
         return npc;
+    }
+
+    private void SetupNPC(GameObject npc)
+    {
+        if (npc == null) return;
+        
+        // Set proper scale (1.5x is larger than player)
+        npc.transform.localScale = new Vector3(1.5f, 1.5f, 1.5f);
+        
+        // Set up NPC-specific components
+        npc.tag = "NPC";
+        npc.layer = LayerMask.NameToLayer("Shootable");
+        
+        // Get PhotonView
+        PhotonView photonView = npc.GetComponent<PhotonView>();
+        if (photonView == null)
+        {
+            Debug.LogError("NPC is missing PhotonView component!");
+            return;
+        }
+        
+        // Add unique name to help with debugging
+        npc.name = $"NPC_{photonView.ViewID}";
+        
+        // Setup components
+        NPCController npcController = npc.GetComponent<NPCController>();
+        if (npcController == null)
+        {
+            npcController = npc.AddComponent<NPCController>();
+        }
+        
+        // Ensure animator component is active
+        Animator animator = npc.GetComponent<Animator>();
+        if (animator == null)
+        {
+            animator = npc.GetComponentInChildren<Animator>();
+        }
+        
+        // If still no animator found, log error
+        if (animator == null)
+        {
+            Debug.LogError($"NPC {npc.name} has no Animator component!");
+        }
+        else
+        {
+            // Make sure animator is enabled and reset
+            animator.enabled = true;
+            animator.Rebind();
+            animator.Update(0f);
+            Debug.Log($"NPC {npc.name} animator initialized");
+        }
+        
+        // Configure NavMeshAgent with unique settings to avoid stacking
+        NavMeshAgent agent = npc.GetComponent<NavMeshAgent>();
+        if (agent != null)
+        {
+            agent.height = 1.8f;
+            agent.radius = 0.5f;
+            agent.baseOffset = 0f;
+            agent.speed = Random.Range(3.0f, 4.0f); // Slightly different speeds
+            agent.acceleration = 12f;
+            agent.angularSpeed = 180f;
+            agent.stoppingDistance = 1f;
+            agent.avoidancePriority = Random.Range(20, 80); // Different priorities
+            
+            // Ensure agent is on NavMesh
+            NavMeshHit hit;
+            if (NavMesh.SamplePosition(npc.transform.position, out hit, 1.0f, NavMesh.AllAreas))
+            {
+                agent.Warp(hit.position);
+            }
+        }
+
+        // Configure collider to match player size
+        CapsuleCollider collider = npc.GetComponent<CapsuleCollider>();
+        if (collider != null)
+        {
+            collider.height = 1.8f;
+            collider.radius = 0.5f;
+            collider.center = new Vector3(0, 0.9f, 0);
+        }
+        
+        // Setup health component
+        NPCHealth npcHealth = npc.GetComponent<NPCHealth>();
+        if (npcHealth == null)
+        {
+            npcHealth = npc.AddComponent<NPCHealth>();
+        }
+
+        // Force the NPC to initialize
+        npcController.InitializeNPC();
+        
+        // Force initialize on all clients
+        photonView.RPC("InitializeRemoteNPC", RpcTarget.Others);
+    }
+
+    [PunRPC]
+    private void InitializeRemoteNPC()
+    {
+        // This is called on client side to ensure the NPC is properly initialized
+        NPCController controller = GetComponent<NPCController>();
+        if (controller != null)
+        {
+            controller.InitializeNPC();
+        }
+        
+        // Set proper scale
+        transform.localScale = new Vector3(1.5f, 1.5f, 1.5f);
+        
+        // Ensure animator is enabled
+        Animator anim = GetComponent<Animator>();
+        if (anim == null)
+        {
+            anim = GetComponentInChildren<Animator>();
+        }
+        
+        if (anim != null)
+        {
+            anim.enabled = true;
+            anim.applyRootMotion = false;
+            anim.Rebind();
+            anim.Update(0f);
+            Debug.Log($"Remote NPC {photonView.ViewID} animator initialized");
+        }
     }
 
     private void VerifyNPCSetup(GameObject npc)
@@ -1090,16 +1176,109 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             Debug.LogError("NPC tag not set correctly!");
     }
 
+    private void MaintainNPCCount()
+    {
+        if (!PhotonNetwork.IsMasterClient) return;
+
+        // Count current NPCs
+        GameObject[] npcs = GameObject.FindGameObjectsWithTag("NPC");
+        int currentNPCCount = npcs.Length;
+
+        // Only spawn if we're below maxNPCs
+        if (currentNPCCount < maxNPCs)
+        {
+            SpawnNPC();
+            Debug.Log($"Spawned new NPC. Current count: {currentNPCCount + 1}/{maxNPCs}");
+        }
+    }
+
     private IEnumerator SpawnInitialNPCs()
     {
         yield return new WaitForSeconds(1f); // Wait for room to fully initialize
         
-        // Spawn 2 NPCs
-        for (int i = 0; i < 3; i++)
+        // Get current NPC count
+        GameObject[] existingNPCs = GameObject.FindGameObjectsWithTag("NPC");
+        int currentCount = existingNPCs.Length;
+        
+        // Spawn NPCs until we reach maxNPCs
+        for (int i = currentCount; i < maxNPCs; i++)
         {
             SpawnNPC();
             yield return new WaitForSeconds(0.5f); // Small delay between spawns
         }
+        
+        Debug.Log($"Initial NPC spawn complete. Count: {maxNPCs}");
+    }
+
+    public void RequestNPCRespawn(Vector3 deathPosition)
+    {
+        if (!PhotonNetwork.IsMasterClient) return;
+        
+        Debug.Log($"NPC respawn requested at position: {deathPosition}");
+        StartCoroutine(RespawnNPCWithDelay(deathPosition));
+    }
+
+    private IEnumerator RespawnNPCWithDelay(Vector3 deathPosition)
+    {
+        Debug.Log("Starting NPC respawn coroutine");
+        
+        // Wait for respawn delay
+        yield return new WaitForSeconds(5f);
+        
+        // Count current NPCs
+        GameObject[] npcs = GameObject.FindGameObjectsWithTag("NPC");
+        Debug.Log($"Current NPC count before respawn: {npcs.Length}/{maxNPCs}");
+        
+        if (npcs.Length < maxNPCs)
+        {
+            // Find valid spawn position away from death position
+            Vector3 spawnPosition = GetRespawnPosition(deathPosition);
+            
+            Debug.Log($"Spawning new NPC at position: {spawnPosition}");
+            
+            // Spawn the NPC
+            GameObject npc = SpawnNPC();
+            if (npc != null)
+            {
+                Debug.Log($"NPC respawned successfully with ViewID: {npc.GetComponent<PhotonView>().ViewID}");
+            }
+            else
+            {
+                Debug.LogError("Failed to spawn new NPC!");
+            }
+        }
+        else
+        {
+            Debug.Log($"Maximum NPC count reached ({maxNPCs}). Skipping respawn.");
+        }
+    }
+
+    private Vector3 GetRespawnPosition(Vector3 deathPosition)
+    {
+        // Try to find a spawn point away from the death position
+        Vector3 bestPosition = spawnPoints[0].position;
+        float maxDistance = 0f;
+        
+        for (int i = 0; i < spawnPoints.Length; i++)
+        {
+            Vector3 spawnPos = spawnPoints[i].position;
+            float distance = Vector3.Distance(spawnPos, deathPosition);
+            
+            if (distance > maxDistance)
+            {
+                maxDistance = distance;
+                bestPosition = spawnPos;
+            }
+        }
+        
+        // Verify the position is on the NavMesh
+        NavMeshHit hit;
+        if (NavMesh.SamplePosition(bestPosition, out hit, 1.0f, NavMesh.AllAreas))
+        {
+            bestPosition = hit.position;
+        }
+        
+        return bestPosition;
     }
 
     public void SetupNPCPrefab()
