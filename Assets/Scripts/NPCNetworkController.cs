@@ -97,38 +97,25 @@ public class NPCNetworkController : MonoBehaviourPunCallbacks, IPunObservable
             // Send data (from MasterClient to others)
             stream.SendNext(transform.position);
             stream.SendNext(transform.rotation);
-            stream.SendNext(agent != null ? agent.velocity : Vector3.zero);
-            stream.SendNext(agent != null ? agent.destination : transform.position);
             
-            // Send animation data
-            if (animator != null)
-            {
-                stream.SendNext(animator.GetFloat("Horizontal"));
-                stream.SendNext(animator.GetFloat("Vertical"));
-                stream.SendNext(animator.GetBool("Running"));
-            }
-            else
-            {
-                stream.SendNext(0f);
-                stream.SendNext(0f);
-                stream.SendNext(false);
-            }
+            // Important: Send isDead state
+            NPCHealth health = GetComponent<NPCHealth>();
+            bool isDead = (health != null) ? health.IsDead() : false;
+            stream.SendNext(isDead);
+            
+            // Rest of your syncing code...
         }
         else
         {
             // Receive data (on non-MasterClient)
             networkPosition = (Vector3)stream.ReceiveNext();
             networkRotation = (Quaternion)stream.ReceiveNext();
-            networkVelocity = (Vector3)stream.ReceiveNext();
-            networkDestination = (Vector3)stream.ReceiveNext();
+            bool isDead = (bool)stream.ReceiveNext();
             
-            // Receive animation data
-            networkHorizontal = (float)stream.ReceiveNext();
-            networkVertical = (float)stream.ReceiveNext();
-            networkIsRunning = (bool)stream.ReceiveNext();
+            // If NPC is dead, don't update position/movement
+            if (isDead) return;
             
-            // Debug info
-            Debug.Log($"NPC {uniqueID} received network update: Pos={networkPosition}, Dest={networkDestination}");
+            // Rest of your receiving code...
         }
     }
 }

@@ -64,6 +64,12 @@ public class NPCHealth : MonoBehaviourPunCallbacks, IPunObservable
     // Change botName to be publicly accessible with private set
     public string BotName { get; private set; }
 
+    // Add a flag to track if bot's entry has been reported
+    private bool wasReported = false;
+
+    // Add this field
+    private bool hasJoinedMessage = false;
+
     void Awake()
     {
         photonView = GetComponent<PhotonView>();
@@ -96,6 +102,9 @@ public class NPCHealth : MonoBehaviourPunCallbacks, IPunObservable
             GenerateRandomBotName();
             photonView.RPC("SetBotName", RpcTarget.AllBuffered, BotName);
         }
+
+        // Reset reported status
+        wasReported = false;
     }
 
     void Start()
@@ -104,9 +113,14 @@ public class NPCHealth : MonoBehaviourPunCallbacks, IPunObservable
         networkManager = FindObjectOfType<NetworkManager>();
         npcController = GetComponent<NPCController>();
         
-        ResetHealth();
-        
+        currentHealth = startingHealth;
+        isDead = false;
+        isSinking = false;
+
         Debug.Log($"NPC Health initialized with {currentHealth} HP. PhotonView ID: {photonView.ViewID}");
+
+        // Adjust the model scale if it's too small
+        transform.localScale = new Vector3(1.5f, 1.5f, 1.5f); // Adjust these values as needed
     }
 
     void Update()
@@ -129,16 +143,12 @@ public class NPCHealth : MonoBehaviourPunCallbacks, IPunObservable
     [PunRPC]
     public void TakeDamage(int amount, string attackerName)
     {
-        // Only process damage on the Master Client (host)
-        if (!PhotonNetwork.IsMasterClient)
-        {
-            return;
-        }
-
+        // Process damage regardless of who is the master client
         Debug.Log($"TakeDamage RPC called on NPC {BotName}. Current Health: {currentHealth}, Damage: {amount} from {attackerName}");
         
         if (isDead) return;
 
+        // Apply damage
         currentHealth -= amount;
         Debug.Log($"NPC Health after damage: {currentHealth}");
 
@@ -148,6 +158,7 @@ public class NPCHealth : MonoBehaviourPunCallbacks, IPunObservable
         // Check for death
         if (currentHealth <= 0 && !isDead)
         {
+            // Ensure ALL clients know this NPC died, not just the master
             photonView.RPC("ProcessDeath", RpcTarget.All, attackerName);
         }
     }
@@ -192,20 +203,10 @@ public class NPCHealth : MonoBehaviourPunCallbacks, IPunObservable
         // Store death position for respawn
         Vector3 deathPosition = transform.position;
 
-        // Get NPC controller to handle animation
-        NPCController controller = GetComponent<NPCController>();
-        if (controller != null)
+        // Disable NPC Controller
+        if (npcController != null)
         {
-            controller.HandleDeath();
-        }
-        else
-        {
-            // Fallback if controller not found
-            if (animator != null)
-            {
-                animator.SetBool("IsDead", true);
-                animator.SetTrigger("Die");
-            }
+            npcController.enabled = false;
         }
 
         // Disable NavMeshAgent
@@ -215,6 +216,13 @@ public class NPCHealth : MonoBehaviourPunCallbacks, IPunObservable
             agent.enabled = false;
         }
 
+        // Play death animation
+        if (animator != null)
+        {
+            animator.SetBool("IsDead", true);
+            animator.SetTrigger("Die");
+        }
+
         // Play death sound
         if (audioSource != null && deathClip != null)
         {
@@ -222,23 +230,21 @@ public class NPCHealth : MonoBehaviourPunCallbacks, IPunObservable
             audioSource.Play();
         }
 
-        // Update killer's stats and trigger respawn
+        // Find NetworkManager if not already set
         if (networkManager == null)
         {
             networkManager = FindObjectOfType<NetworkManager>();
         }
         
-        if (networkManager != null)
+        if (networkManager != null && networkManager.photonView != null)
         {
-            // Award kill to the killer
-            if (PhotonNetwork.IsMasterClient)
-            {
-                networkManager.photonView.RPC("AddBotKill_RPC", RpcTarget.All, killerName, BotName);
-                
-                // Request NPC respawn directly - only master client should do this
-                Debug.Log($"Requesting respawn for NPC: {BotName}");
-                networkManager.RequestNPCRespawn(deathPosition);
-            }
+            networkManager.photonView.RPC("AddMessage_RPC", RpcTarget.All, $"{BotName} was eliminated by {killerName}!");
+            
+            // Award kill to the killer on all clients
+            networkManager.photonView.RPC("AddBotKill_RPC", RpcTarget.All, killerName, BotName);
+            
+            // IMPORTANT - Use the uniquely named RequestBotRespawnRPC method
+            networkManager.photonView.RPC("RequestBotRespawnRPC", RpcTarget.MasterClient, deathPosition);
         }
 
         // Invoke death event
@@ -270,13 +276,20 @@ public class NPCHealth : MonoBehaviourPunCallbacks, IPunObservable
 
     private IEnumerator DestroyAfterDelay()
     {
-        Debug.Log($"NPC {BotName} will be destroyed in {respawnTime} seconds");
-        yield return new WaitForSeconds(respawnTime);
+        // Wait for sinking animation
+        yield return new WaitForSeconds(sinkTime); 
         
-        // Only destroy if we're still the master client
+        // Add "leaving battlefield" message
+        if (networkManager != null && networkManager.photonView != null)
+        {
+            networkManager.photonView.RPC("AddMessage_RPC", RpcTarget.All, $"{BotName} has left the battlefield!");
+        }
+        
+        // Wait remaining time before destroying
+        yield return new WaitForSeconds(respawnTime - sinkTime);
+        
         if (PhotonNetwork.IsMasterClient)
         {
-            Debug.Log($"Destroying NPC {BotName} with ViewID: {photonView.ViewID}");
             PhotonNetwork.Destroy(gameObject);
         }
     }
@@ -335,8 +348,17 @@ public class NPCHealth : MonoBehaviourPunCallbacks, IPunObservable
         }
         else
         {
-            // Create name tag if it doesn't exist
             CreateNameTag();
+        }
+        
+        // Show join message only once
+        if (!hasJoinedMessage && networkManager != null)
+        {
+            if (networkManager.photonView != null)
+            {
+                networkManager.photonView.RPC("AddMessage_RPC", RpcTarget.All, $"{BotName} has entered the arena!");
+            }
+            hasJoinedMessage = true;
         }
     }
 

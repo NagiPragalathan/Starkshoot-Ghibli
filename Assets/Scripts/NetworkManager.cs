@@ -975,7 +975,13 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
 
     public GameObject SpawnNPC()
     {
-        if (!PhotonNetwork.IsMasterClient) return null;
+        if (!PhotonNetwork.IsMasterClient)
+        {
+            Debug.LogWarning("Only MasterClient can spawn NPCs!");
+            return null;
+        }
+        
+        Debug.Log("SpawnNPC called by MasterClient");
         
         // Choose a random spawn point
         int spawnIndex = Random.Range(0, spawnPoints.Length);
@@ -989,30 +995,40 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             spawnPosition = hit.position;
         }
         
-        // Ensure spawn points are far enough apart
-        GameObject[] existingNPCs = GameObject.FindGameObjectsWithTag("NPC");
-        foreach (GameObject existingNPC in existingNPCs)
+        // Check that we have the NPC prefab
+        if (npcPrefab == null)
         {
-            if (Vector3.Distance(existingNPC.transform.position, spawnPosition) < 3f)
+            Debug.LogError("NPC Prefab is null! Cannot spawn NPC.");
+            return null;
+        }
+        
+        try
+        {
+            // Instantiate the NPC
+            GameObject npc = PhotonNetwork.Instantiate(npcPrefab.name, spawnPosition, spawnRotation, 0);
+            
+            if (npc != null)
             {
-                // Try a different spawn point
-                spawnIndex = (spawnIndex + 1) % spawnPoints.Length;
-                spawnPosition = spawnPoints[spawnIndex].position;
-                break;
+                PhotonView pv = npc.GetComponent<PhotonView>();
+                Debug.Log($"NPC spawned with PhotonView ID: {pv.ViewID} at position: {spawnPosition}");
+                SetupNPC(npc);
+                
+                // Don't add message here since the bot name isn't set yet
+                // The message will be added in the SetBotName RPC in NPCHealth
+                
+                return npc;
+            }
+            else
+            {
+                Debug.LogError("Failed to instantiate NPC prefab!");
+                return null;
             }
         }
-        
-        // Instantiate the NPC
-        GameObject npc = PhotonNetwork.Instantiate(npcPrefab.name, spawnPosition, spawnRotation, 0);
-        
-        if (npc != null)
+        catch (System.Exception e)
         {
-            PhotonView pv = npc.GetComponent<PhotonView>();
-            Debug.Log($"NPC spawned with ViewID: {pv.ViewID} at position {spawnPosition}");
-            SetupNPC(npc);
+            Debug.LogError($"Error spawning NPC: {e.Message}");
+            return null;
         }
-        
-        return npc;
     }
 
     private void SetupNPC(GameObject npc)
@@ -1196,18 +1212,15 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     {
         yield return new WaitForSeconds(1f); // Wait for room to fully initialize
         
-        // Get current NPC count
-        GameObject[] existingNPCs = GameObject.FindGameObjectsWithTag("NPC");
-        int currentCount = existingNPCs.Length;
+        // Add a message that bots are joining the battle
+        AddMessage("Bots are joining the battle!");
         
-        // Spawn NPCs until we reach maxNPCs
-        for (int i = currentCount; i < maxNPCs; i++)
+        // Spawn NPCs with a slight delay to ensure everything is set up
+        for (int i = 0; i < 3; i++)
         {
             SpawnNPC();
             yield return new WaitForSeconds(0.5f); // Small delay between spawns
         }
-        
-        Debug.Log($"Initial NPC spawn complete. Count: {maxNPCs}");
     }
 
     public void RequestNPCRespawn(Vector3 deathPosition)
@@ -1240,7 +1253,14 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             GameObject npc = SpawnNPC();
             if (npc != null)
             {
-                Debug.Log($"NPC respawned successfully with ViewID: {npc.GetComponent<PhotonView>().ViewID}");
+                PhotonView pv = npc.GetComponent<PhotonView>();
+                NPCHealth health = npc.GetComponent<NPCHealth>();
+                string botName = health != null ? health.BotName : "Bot";
+                
+                // Add message about NPC respawn - synchronized to all clients
+                AddMessage($"{botName} has respawned into the battle!");
+                
+                Debug.Log($"NPC respawned successfully with ViewID: {pv.ViewID}");
             }
             else
             {
@@ -1410,6 +1430,20 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     public void ClearProcessedKills()
     {
         processedKills.Clear();
+    }
+
+    [PunRPC]
+    public void RequestBotRespawnRPC(Vector3 deathPosition)
+    {
+        if (!PhotonNetwork.IsMasterClient) return;
+        
+        Debug.Log($"Master client received bot respawn request");
+        
+        // Add battle message using RPC
+        photonView.RPC("AddMessage_RPC", RpcTarget.All, "A new bot is joining the battle!");
+        
+        // Call your existing respawn method
+        StartCoroutine(RespawnNPCWithDelay(deathPosition));
     }
 
 }
