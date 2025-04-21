@@ -7,6 +7,9 @@ using System.Collections.Generic;
 using System.Linq;
 using UnityEngine.SceneManagement;
 using System;
+using UnityStandardAssets.Characters.FirstPerson;
+using UnityEngine.AI;
+using Random = UnityEngine.Random;
 
 public class NetworkManager : MonoBehaviourPunCallbacks {
 
@@ -49,6 +52,11 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     [SerializeField]
     private float[] timeOptions = { 180f, 300f, 600f }; // 3, 5, 10 minutes
 
+    [Header("NPC Settings")]
+    [SerializeField] private GameObject npcPrefab;
+    [SerializeField] private int maxNPCs = 5;
+    [SerializeField] private float npcSpawnDelay = 5f;
+
     private GameObject player;
     private Queue<string> messages;
     private const int messageCount = 10;
@@ -70,6 +78,9 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     private const float CONNECTION_CHECK_INTERVAL = 1f;
     private float connectionCheckTimer = 0f;
 
+    // Add a new dictionary to track bot kills
+    private Dictionary<string, int> botKills = new Dictionary<string, int>();
+
     // Add this class to track player statistics
     private class PlayerStats {
         public int Score { get; set; }
@@ -80,6 +91,9 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             Kills = 0;
         }
     }
+
+    // Add a HashSet to track processed kills
+    private HashSet<string> processedKills = new HashSet<string>();
 
     /// <summary>
     /// Start is called on the frame when a script is enabled just before
@@ -122,6 +136,8 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         // Add these lines to handle application focus
         Application.runInBackground = true;
         PhotonNetwork.KeepAliveInBackground = 3000; // Keep connection alive for 3 seconds in background
+
+        SetupNPCPrefab();
     }
 
     void SetupTimeDropdown() {
@@ -343,6 +359,12 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             // Restore player state if needed
             RestorePlayerState();
         }
+
+        if (PhotonNetwork.IsMasterClient)
+        {
+            // Spawn NPCs with a slight delay to ensure everything is set up
+            StartCoroutine(SpawnInitialNPCs());
+        }
     }
 
     /// <summary>
@@ -363,8 +385,8 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         yield return new WaitForSeconds(spawnTime);
         messageWindow.SetActive(true);
         sightImage.SetActive(true);
-        int playerIndex = UnityEngine.Random.Range(0, playerModel.Length);
-        int spawnIndex = UnityEngine.Random.Range(0, spawnPoints.Length);
+        int playerIndex = Random.Range(0, playerModel.Length);
+        int spawnIndex = Random.Range(0, spawnPoints.Length);
         player = PhotonNetwork.Instantiate(playerModel[playerIndex].name, spawnPoints[spawnIndex].position, spawnPoints[spawnIndex].rotation, 0);
         
         PlayerHealth playerHealth = player.GetComponent<PlayerHealth>();
@@ -766,15 +788,12 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     }
 
     [PunRPC]
-    private void AddKill_RPC(string killerName) {
-        Debug.Log($"AddKill_RPC called for player: {killerName}");
-        
-        if (!playerStats.ContainsKey(killerName)) {
+    private void AddKill_RPC(string killerName)
+    {
+        // This method now only handles player kills
+        if (!playerStats.ContainsKey(killerName))
+        {
             playerStats[killerName] = new PlayerStats();
-        }
-        
-        if (!killStreaks.ContainsKey(killerName)) {
-            killStreaks[killerName] = 0;
         }
         
         // Update kill streak and calculate score
@@ -788,14 +807,14 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         
         // Add kill streak notification to chat
         string notification = GetKillStreakNotification(killStreaks[killerName]);
-        if (!string.IsNullOrEmpty(notification)) {
+        if (!string.IsNullOrEmpty(notification))
+        {
             AddMessage($"{killerName} - {notification}!");
         }
         
-        Debug.Log($"Updated stats for {killerName}: Kills={playerStats[killerName].Kills}, Score={currentScore}, Streak={killStreaks[killerName]}");
-        
         // Update UI if this is the killer's client
-        if (killerName == PhotonNetwork.LocalPlayer.NickName) {
+        if (killerName == PhotonNetwork.LocalPlayer.NickName)
+        {
             UpdateUIStats(currentScore, playerStats[killerName].Kills);
         }
     }
@@ -946,6 +965,272 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
                 StartCoroutine(TryReconnect());
             }
         }
+    }
+
+    public GameObject SpawnNPC()
+    {
+        if (!PhotonNetwork.IsMasterClient) return null;
+        
+        // Choose a random spawn point
+        int spawnIndex = Random.Range(0, spawnPoints.Length);
+        Vector3 spawnPosition = spawnPoints[spawnIndex].position;
+        Quaternion spawnRotation = spawnPoints[spawnIndex].rotation;
+
+        // Verify spawn point is on NavMesh
+        NavMeshHit hit;
+        if (NavMesh.SamplePosition(spawnPosition, out hit, 1.0f, NavMesh.AllAreas))
+        {
+            spawnPosition = hit.position;
+        }
+        
+        // Instantiate the NPC using the NPC prefab
+        GameObject npc = PhotonNetwork.Instantiate(npcPrefab.name, spawnPosition, spawnRotation, 0);
+        
+        if (npc != null)
+        {
+            // Set the proper scale for the NPC
+            npc.transform.localScale = new Vector3(1.5f, 1.5f, 1.5f); // Adjust these values as needed
+            
+            // Set up NPC-specific components
+            npc.tag = "NPC";
+            npc.layer = LayerMask.NameToLayer("Shootable");
+            
+            // Add and setup the network controller
+            NPCNetworkController networkController = npc.GetComponent<NPCNetworkController>();
+            if (networkController == null)
+            {
+                networkController = npc.AddComponent<NPCNetworkController>();
+            }
+            
+            PhotonView photonView = npc.GetComponent<PhotonView>();
+            if (photonView != null)
+            {
+                // Make sure both controllers are observed
+                if (!photonView.ObservedComponents.Contains(networkController))
+                {
+                    photonView.ObservedComponents.Add(networkController);
+                }
+                
+                // Set synchronization mode
+                photonView.Synchronization = ViewSynchronization.UnreliableOnChange;
+                photonView.ObservedComponents = new List<Component> { networkController };
+            }
+            
+            // Configure the NPC's collider to match the new scale
+            CapsuleCollider collider = npc.GetComponent<CapsuleCollider>();
+            if (collider != null)
+            {
+                collider.height = 2f; // Adjust based on your model
+                collider.radius = 0.5f; // Adjust based on your model
+                collider.center = new Vector3(0, 1f, 0); // Adjust to match model center
+            }
+
+            // Adjust NavMeshAgent settings for the new scale
+            NavMeshAgent agent = npc.GetComponent<NavMeshAgent>();
+            if (agent != null)
+            {
+                agent.height = 2f; // Match collider height
+                agent.radius = 0.5f; // Match collider radius
+                agent.baseOffset = 0f; // Adjust if needed to ensure NPC is on ground
+            }
+
+            // Make sure NPCHealth component is present
+            NPCHealth npcHealth = npc.GetComponent<NPCHealth>();
+            if (npcHealth == null)
+            {
+                npcHealth = npc.AddComponent<NPCHealth>();
+            }
+            
+            // The name will be set through the NPCHealth Awake method
+            
+            // Clear any processed kills for this new NPC
+            if (npcHealth != null && !string.IsNullOrEmpty(npcHealth.BotName))
+            {
+                processedKills.RemoveWhere(k => k.StartsWith(npcHealth.BotName + "_"));
+            }
+        }
+        
+        return npc;
+    }
+
+    private void VerifyNPCSetup(GameObject npc)
+    {
+        if (npc == null)
+        {
+            Debug.LogError("NPC object is null!");
+            return;
+        }
+
+        // Check essential components
+        var health = npc.GetComponent<NPCHealth>();
+        if (health == null) Debug.LogError("NPCHealth component missing!");
+
+        var photonView = npc.GetComponent<PhotonView>();
+        if (photonView == null) Debug.LogError("PhotonView component missing!");
+
+        var animator = npc.GetComponent<Animator>();
+        if (animator == null)
+        {
+            animator = npc.GetComponentInChildren<Animator>();
+            if (animator == null) Debug.LogError("Animator component missing!");
+        }
+
+        var npcController = npc.GetComponent<NPCController>();
+        if (npcController == null) Debug.LogError("NPCController component missing!");
+
+        var agent = npc.GetComponent<NavMeshAgent>();
+        if (agent == null) Debug.LogError("NavMeshAgent component missing!");
+
+        // Verify layer
+        if (npc.layer != LayerMask.NameToLayer("Shootable"))
+            Debug.LogError("NPC not in Shootable layer!");
+
+        // Verify tag
+        if (npc.tag != "NPC")
+            Debug.LogError("NPC tag not set correctly!");
+    }
+
+    private IEnumerator SpawnInitialNPCs()
+    {
+        yield return new WaitForSeconds(1f); // Wait for room to fully initialize
+        
+        // Spawn 2 NPCs
+        for (int i = 0; i < 3; i++)
+        {
+            SpawnNPC();
+            yield return new WaitForSeconds(0.5f); // Small delay between spawns
+        }
+    }
+
+    public void SetupNPCPrefab()
+    {
+        // Add this method to your NetworkManager to verify NPC prefab setup
+        GameObject npcPrefab = Resources.Load<GameObject>("NPCPrefab");
+        if (npcPrefab != null)
+        {
+            // Check components
+            NPCHealth health = npcPrefab.GetComponent<NPCHealth>();
+            if (health == null)
+            {
+                Debug.LogError("NPCPrefab missing NPCHealth component!");
+            }
+
+            PhotonView photonView = npcPrefab.GetComponent<PhotonView>();
+            if (photonView == null)
+            {
+                Debug.LogError("NPCPrefab missing PhotonView component!");
+            }
+            else
+            {
+                // Verify PhotonView settings
+                photonView.ObservedComponents = new List<Component> { health };
+                photonView.Synchronization = ViewSynchronization.UnreliableOnChange;
+            }
+
+            Animator animator = npcPrefab.GetComponent<Animator>();
+            if (animator == null)
+            {
+                Debug.LogError("NPCPrefab missing Animator component!");
+            }
+            else
+            {
+                // Verify animator parameters
+                bool hasIsHurt = false;
+                bool hasIsDead = false;
+                foreach (AnimatorControllerParameter param in animator.parameters)
+                {
+                    if (param.name == "IsHurt") hasIsHurt = true;
+                    if (param.name == "IsDead") hasIsDead = true;
+                }
+                if (!hasIsHurt) Debug.LogError("Animator missing IsHurt parameter!");
+                if (!hasIsDead) Debug.LogError("Animator missing IsDead parameter!");
+            }
+        }
+        else
+        {
+            Debug.LogError("NPCPrefab not found in Resources folder!");
+        }
+    }
+
+    // Add new method for bot kills
+    [PunRPC]
+    private void AddBotKill_RPC(string killerName, string botName)
+    {
+        // Add logging to track when this is called
+        Debug.Log($"AddBotKill_RPC called - Killer: {killerName}, Bot: {botName}, IsMasterClient: {PhotonNetwork.IsMasterClient}");
+
+        // Ensure this bot hasn't already been counted
+        string killKey = $"{botName}_{killerName}";
+        if (!processedKills.Contains(killKey))
+        {
+            processedKills.Add(killKey);
+            
+            if (!playerStats.ContainsKey(killerName))
+            {
+                playerStats[killerName] = new PlayerStats();
+            }
+            
+            // Update kill streak and calculate score
+            killStreaks[killerName]++;
+            int scoreToAdd = CalculateBotKillScore(killStreaks[killerName]);
+            
+            // Update killer's stats
+            playerStats[killerName].Kills++;
+            int currentScore = playerStats[killerName].Score + scoreToAdd;
+            playerStats[killerName].Score = currentScore;
+            
+            // Track bot kills separately
+            if (!botKills.ContainsKey(killerName))
+            {
+                botKills[killerName] = 0;
+            }
+            botKills[killerName]++;
+            
+            // Add kill message to chat
+            AddMessage($"{killerName} eliminated {botName}!");
+            
+            // Add kill streak notification to chat
+            string notification = GetKillStreakNotification(killStreaks[killerName]);
+            if (!string.IsNullOrEmpty(notification))
+            {
+                AddMessage($"{killerName} - {notification}!");
+            }
+            
+            // Update UI if this is the killer's client
+            if (killerName == PhotonNetwork.LocalPlayer.NickName)
+            {
+                UpdateUIStats(currentScore, playerStats[killerName].Kills);
+            }
+        }
+        else
+        {
+            Debug.Log($"Kill already processed for {killKey}");
+        }
+    }
+
+    // Add method to calculate bot kill score (you can adjust the values)
+    private int CalculateBotKillScore(int killStreak)
+    {
+        // Bots might be worth less points than player kills
+        switch (killStreak)
+        {
+            case 1:
+                return 5;  // First bot kill
+            case 2:
+                return 8;  // Double kill
+            case 3:
+                return 12; // Triple kill
+            case 4:
+                return 20; // Killing spree
+            default:
+                return 30; // God like
+        }
+    }
+
+    // Add method to clear processed kills (call this when starting a new game or as needed)
+    public void ClearProcessedKills()
+    {
+        processedKills.Clear();
     }
 
 }

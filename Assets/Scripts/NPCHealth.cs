@@ -1,0 +1,365 @@
+using Photon.Pun;
+using UnityEngine;
+using UnityEngine.UI;
+using System.Collections;
+using UnityEngine.AI;
+using System;
+
+public class NPCHealth : MonoBehaviourPunCallbacks, IPunObservable
+{
+    public delegate void Respawn(float time);
+    public delegate void AddMessage(string Message);
+    public event Respawn RespawnEvent;
+    public event AddMessage AddMessageEvent;
+
+    // Events
+    public event Action OnDamageReceived;
+    public event Action OnDeath;
+
+    [SerializeField]
+    private int startingHealth = 100;
+    [SerializeField]
+    private float sinkSpeed = 0.12f;
+    [SerializeField]
+    private float sinkTime = 2.5f;
+    [SerializeField]
+    private float respawnTime = 8.0f;
+    [SerializeField]
+    private AudioClip deathClip;
+    [SerializeField]
+    private AudioClip hurtClip;
+    [SerializeField]
+    private AudioSource audioSource;
+    [SerializeField]
+    private Animator animator;
+    [SerializeField]
+    private TextMesh nameTagText; // Reference to the 3D text mesh for the name tag
+
+    [Header("Name Tag Settings")]
+    [SerializeField] private float nameTagHeight = 1.8f; // Height above the model
+    [SerializeField] private float nameTagScale = 0.1f;  // Overall scale of the name tag
+    [SerializeField] private int nameTagFontSize = 20;   // Font size for the name tag
+    [SerializeField] private Color nameTagColor = new Color(1f, 0f, 0f, 0.8f); // Slightly transparent red
+
+    private int currentHealth;
+    private bool isDead;
+    private bool isSinking;
+    private NetworkManager networkManager;
+    private PhotonView photonView;
+    private NPCController npcController;
+
+    // Add these new variables for position/rotation sync
+    private Vector3 networkPosition;
+    private Quaternion networkRotation;
+    private float lastNetworkPositionUpdate;
+    private const float NETWORK_SMOOTHING = 10f;
+
+    // Add these new variables
+    private static readonly string[] BotFirstNames = {
+        "Bot_Alpha", "Bot_Beta", "Bot_Delta", "Bot_Echo", 
+        "Bot_Foxtrot", "Bot_Ghost", "Bot_Hunter", "Bot_Iron",
+        "Bot_Juliet", "Bot_Kilo", "Bot_Lima", "Bot_Mike"
+    };
+
+    // Change botName to be publicly accessible with private set
+    public string BotName { get; private set; }
+
+    void Awake()
+    {
+        photonView = GetComponent<PhotonView>();
+        if (photonView == null)
+        {
+            Debug.LogError("PhotonView missing on NPCHealth!");
+            photonView = gameObject.AddComponent<PhotonView>();
+        }
+        
+        // Make sure this component is observed by PhotonView
+        if (!photonView.ObservedComponents.Contains(this))
+        {
+            photonView.ObservedComponents.Add(this);
+        }
+        
+        // Set up audio source if needed
+        if (audioSource == null)
+        {
+            audioSource = gameObject.AddComponent<AudioSource>();
+        }
+
+        // Initialize network position/rotation
+        networkPosition = transform.position;
+        networkRotation = transform.rotation;
+        lastNetworkPositionUpdate = Time.time;
+
+        // Generate random bot name if we're the master client
+        if (PhotonNetwork.IsMasterClient)
+        {
+            GenerateRandomBotName();
+            photonView.RPC("SetBotName", RpcTarget.AllBuffered, BotName);
+        }
+    }
+
+    void Start()
+    {
+        animator = GetComponent<Animator>();
+        networkManager = FindObjectOfType<NetworkManager>();
+        npcController = GetComponent<NPCController>();
+        
+        currentHealth = startingHealth;
+        isDead = false;
+        isSinking = false;
+
+        Debug.Log($"NPC Health initialized with {currentHealth} HP. PhotonView ID: {photonView.ViewID}");
+
+        // Adjust the model scale if it's too small
+        transform.localScale = new Vector3(1.5f, 1.5f, 1.5f); // Adjust these values as needed
+    }
+
+    void Update()
+    {
+        if (isSinking)
+        {
+            transform.Translate(Vector3.down * sinkSpeed * Time.deltaTime);
+            return;
+        }
+
+        // Only interpolate position if we're not the Master Client
+        if (!PhotonNetwork.IsMasterClient && !isDead)
+        {
+            // Smoothly move to the network position
+            transform.position = Vector3.Lerp(transform.position, networkPosition, Time.deltaTime * NETWORK_SMOOTHING);
+            transform.rotation = Quaternion.Lerp(transform.rotation, networkRotation, Time.deltaTime * NETWORK_SMOOTHING);
+        }
+    }
+
+    [PunRPC]
+    public void TakeDamage(int amount, string attackerName)
+    {
+        // Only process damage on the Master Client (host)
+        if (!PhotonNetwork.IsMasterClient)
+        {
+            return;
+        }
+
+        Debug.Log($"TakeDamage RPC called on NPC {BotName}. Current Health: {currentHealth}, Damage: {amount} from {attackerName}");
+        
+        if (isDead) return;
+
+        currentHealth -= amount;
+        Debug.Log($"NPC Health after damage: {currentHealth}");
+
+        // Synchronize the damage animation and effects across all clients
+        photonView.RPC("SyncDamageEffects", RpcTarget.All);
+
+        // Check for death
+        if (currentHealth <= 0 && !isDead)
+        {
+            photonView.RPC("ProcessDeath", RpcTarget.All, attackerName);
+        }
+    }
+
+    [PunRPC]
+    private void SyncDamageEffects()
+    {
+        // Invoke damage event
+        OnDamageReceived?.Invoke();
+
+        // Play hurt animation
+        if (animator != null)
+        {
+            animator.SetTrigger("IsHurt");
+        }
+
+        // Play hurt sound
+        if (audioSource != null && hurtClip != null)
+        {
+            audioSource.clip = hurtClip;
+            audioSource.Play();
+        }
+    }
+
+    [PunRPC]
+    private void ProcessDeath(string killerName)
+    {
+        if (isDead) return;
+        isDead = true;
+
+        Debug.Log($"NPC {BotName} died, killed by: {killerName}");
+
+        // Disable NPC Controller
+        if (npcController != null)
+        {
+            npcController.enabled = false;
+        }
+
+        // Disable NavMeshAgent
+        var agent = GetComponent<NavMeshAgent>();
+        if (agent != null)
+        {
+            agent.enabled = false;
+        }
+
+        // Play death animation
+        if (animator != null)
+        {
+            animator.SetBool("IsDead", true);
+            animator.SetTrigger("Die");
+        }
+
+        // Play death sound
+        if (audioSource != null && deathClip != null)
+        {
+            audioSource.clip = deathClip;
+            audioSource.Play();
+        }
+
+        // Update killer's stats
+        if (PhotonNetwork.IsMasterClient)
+        {
+            if (networkManager != null)
+            {
+                networkManager.photonView.RPC("AddBotKill_RPC", RpcTarget.All, killerName, BotName);
+            }
+        }
+
+        // Invoke death event
+        OnDeath?.Invoke();
+
+        // Start sinking and destroy
+        StartCoroutine(StartSinking());
+        
+        // Only Master Client should destroy the NPC
+        if (PhotonNetwork.IsMasterClient)
+        {
+            StartCoroutine(DestroyAfterDelay());
+        }
+    }
+
+    IEnumerator StartSinking()
+    {
+        yield return new WaitForSeconds(sinkTime);
+        isSinking = true;
+        
+        // Disable physics
+        var rb = GetComponent<Rigidbody>();
+        if (rb != null)
+        {
+            rb.isKinematic = true;
+            rb.useGravity = false;
+        }
+    }
+
+    private IEnumerator DestroyAfterDelay()
+    {
+        yield return new WaitForSeconds(respawnTime);
+        if (PhotonNetwork.IsMasterClient)
+        {
+            PhotonNetwork.Destroy(gameObject);
+        }
+    }
+
+    public void OnPhotonSerializeView(PhotonStream stream, PhotonMessageInfo info)
+    {
+        if (stream.IsWriting)
+        {
+            // Send position, rotation, health data, and isDead state
+            stream.SendNext(transform.position);
+            stream.SendNext(transform.rotation);
+            stream.SendNext(currentHealth);
+            stream.SendNext(isDead);
+            stream.SendNext(BotName);
+        }
+        else
+        {
+            // Receive position, rotation, health data, and isDead state
+            networkPosition = (Vector3)stream.ReceiveNext();
+            networkRotation = (Quaternion)stream.ReceiveNext();
+            currentHealth = (int)stream.ReceiveNext();
+            isDead = (bool)stream.ReceiveNext();
+            BotName = (string)stream.ReceiveNext();
+            
+            // Update the last network position time
+            lastNetworkPositionUpdate = Time.time;
+        }
+    }
+
+    public int GetCurrentHealth()
+    {
+        return currentHealth;
+    }
+
+    // Helper method to check if NPC is dead (useful for other systems)
+    public bool IsDead()
+    {
+        return isDead;
+    }
+
+    private void GenerateRandomBotName()
+    {
+        string prefix = "Bot-";
+        string name = BotFirstNames[UnityEngine.Random.Range(0, BotFirstNames.Length)];
+        string number = UnityEngine.Random.Range(1, 100).ToString("00");
+        BotName = $"{prefix}{name}{number}";
+    }
+
+    [PunRPC]
+    private void SetBotName(string name)
+    {
+        BotName = name;
+        if (nameTagText != null)
+        {
+            nameTagText.text = BotName;
+        }
+        else
+        {
+            // Create name tag if it doesn't exist
+            CreateNameTag();
+        }
+    }
+
+    private void CreateNameTag()
+    {
+        // Create a new GameObject for the name tag
+        GameObject nameTagObj = new GameObject("BotNameTag");
+        nameTagObj.transform.SetParent(transform);
+        nameTagObj.transform.localPosition = new Vector3(0, nameTagHeight, 0);
+        nameTagObj.transform.localScale = new Vector3(nameTagScale, nameTagScale, nameTagScale);
+        
+        // Add TextMesh component
+        nameTagText = nameTagObj.AddComponent<TextMesh>();
+        nameTagText.text = BotName;
+        nameTagText.fontSize = nameTagFontSize;
+        nameTagText.alignment = TextAlignment.Center;
+        nameTagText.anchor = TextAnchor.MiddleCenter;
+        nameTagText.color = nameTagColor;
+        nameTagText.characterSize = 1;
+        nameTagText.richText = true;
+        
+        // Add Billboard script to make text face camera
+        nameTagObj.AddComponent<Billboard>();
+    }
+
+    private void UpdateNameTagVisibility()
+    {
+        if (nameTagText == null) return;
+
+        // Get distance to main camera
+        Camera mainCamera = Camera.main;
+        if (mainCamera == null) return;
+
+        float distanceToCamera = Vector3.Distance(transform.position, mainCamera.transform.position);
+        
+        // Scale text based on distance (within reasonable limits)
+        float scaleFactor = Mathf.Clamp(distanceToCamera * 0.05f, 0.5f, 2f);
+        nameTagText.transform.localScale = new Vector3(scaleFactor, scaleFactor, scaleFactor) * nameTagScale;
+        
+        // Fade out name tag if too far or too close
+        Color currentColor = nameTagText.color;
+        float alpha = Mathf.Clamp01(1f - (distanceToCamera - 5f) / 20f); // Fade between 5 and 25 units
+        nameTagText.color = new Color(currentColor.r, currentColor.g, currentColor.b, alpha);
+    }
+
+    void LateUpdate()
+    {
+        UpdateNameTagVisibility();
+    }
+}
