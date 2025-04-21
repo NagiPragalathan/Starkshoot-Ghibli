@@ -94,16 +94,22 @@ public class PlayerHealth : MonoBehaviourPunCallbacks, IPunObservable {
     /// <param name="enemyName">Enemy's name who cause this player's death.</param>
     [PunRPC]
     public void TakeDamage(int amount, string enemyName) {
+        Debug.Log($"TakeDamage called on {gameObject.name} for {amount} damage from {enemyName}");
+        
         if (isDead) return;
+        
         if (photonView.IsMine) {
             damaged = true;
             currentHealth -= amount;
+            Debug.Log($"{gameObject.name} health now: {currentHealth}");
+            
             if (currentHealth <= 0) {
                 photonView.RPC("Death", RpcTarget.All, enemyName);
             }
             healthSlider.value = currentHealth;
             animator.SetTrigger("IsHurt");
         }
+        
         playerAudio.clip = hurtClip;
         playerAudio.Play();
     }

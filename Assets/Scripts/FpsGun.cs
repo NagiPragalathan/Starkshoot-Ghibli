@@ -30,6 +30,7 @@ public class FpsGun : MonoBehaviour {
     /// </summary>
     void Start() {
         timer = 0.0f;
+        CheckImpactResources();
     }
 
     /// <summary>
@@ -51,28 +52,81 @@ public class FpsGun : MonoBehaviour {
         timer = 0.0f;
         gunLine.enabled = true;
         StartCoroutine(DisableShootingEffect());
-        if (gunParticles.isPlaying) {
+        
+        if (gunParticles.isPlaying)
+        {
             gunParticles.Stop();
         }
         gunParticles.Play();
-        // Ray casting for shooting hit detection.
+
         RaycastHit shootHit;
         Ray shootRay = raycastCamera.ScreenPointToRay(new Vector3(Screen.width/2, Screen.height/2, 0f));
-        if (Physics.Raycast(shootRay, out shootHit, weaponRange, LayerMask.GetMask("Shootable"))) {
-            string hitTag = shootHit.transform.gameObject.tag;
-            switch (hitTag) {
-                case "Player":
-                    shootHit.collider.GetComponent<PhotonView>().RPC("TakeDamage", RpcTarget.All, damagePerShot, PhotonNetwork.LocalPlayer.NickName);
-                    PhotonNetwork.Instantiate("impactFlesh", shootHit.point, Quaternion.Euler(shootHit.normal.x - 90, shootHit.normal.y, shootHit.normal.z), 0);
-                    break;
-                default:
-                    PhotonNetwork.Instantiate("impact" + hitTag, shootHit.point, Quaternion.Euler(shootHit.normal.x - 90, shootHit.normal.y, shootHit.normal.z), 0);
-                    break;
+        
+        if (Physics.Raycast(shootRay, out shootHit, weaponRange, LayerMask.GetMask("Shootable")))
+        {
+            GameObject hitObject = shootHit.collider.gameObject;
+            Debug.Log($"Hit object: {hitObject.name} with tag: {hitObject.tag}");
+
+            if (hitObject.CompareTag("NPC"))
+            {
+                // Try to get NPCHealth
+                NPCHealth npcHealth = hitObject.GetComponent<NPCHealth>();
+                if (npcHealth != null && npcHealth.photonView != null)
+                {
+                    Debug.Log($"Applying damage to NPC with PhotonView ID: {npcHealth.photonView.ViewID}");
+                    npcHealth.photonView.RPC("TakeDamage", RpcTarget.All, damagePerShot, PhotonNetwork.LocalPlayer.NickName);
+                }
+                else
+                {
+                    Debug.LogError($"NPC missing NPCHealth or PhotonView component: {hitObject.name}");
+                }
+            }
+            else if (hitObject.CompareTag("Player"))
+            {
+                // Handle player damage
+                PlayerHealth playerHealth = hitObject.GetComponent<PlayerHealth>();
+                if (playerHealth != null && playerHealth.photonView != null)
+                {
+                    playerHealth.photonView.RPC("TakeDamage", RpcTarget.All, damagePerShot, PhotonNetwork.LocalPlayer.NickName);
+                }
+            }
+
+            // Handle impact effects
+            string impactEffectName = hitObject.CompareTag("NPC") ? "impactFlesh" : GetImpactEffectName(hitObject.tag);
+            try
+            {
+                PhotonNetwork.Instantiate(impactEffectName, 
+                    shootHit.point, 
+                    Quaternion.FromToRotation(Vector3.up, shootHit.normal),
+                    0);
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogError($"Error spawning impact effect: {e.Message}");
             }
         }
-        tpsGun.RPCShoot();  // RPC for third person view
+
+        tpsGun.RPCShoot();
     }
 
+    private string GetImpactEffectName(string hitTag)
+    {
+        switch (hitTag.ToLower())
+        {
+            case "player":
+            case "npc":
+                return "impactFlesh";
+            case "metal":
+                return "impactMetal";
+            case "wood":
+                return "impactWood";
+            case "stone":
+            case "concrete":
+                return "impactConcrete";
+            default:
+                return "impactFlesh"; // Default to flesh impact if no specific effect
+        }
+    }
 
     /// <summary>
     /// Coroutine function to disable shooting effect.
@@ -80,6 +134,39 @@ public class FpsGun : MonoBehaviour {
     public IEnumerator DisableShootingEffect() {
         yield return new WaitForSeconds(0.05f);
         gunLine.enabled = false;
+    }
+
+    private void CheckImpactResources()
+    {
+        string[] effectNames = new string[] 
+        { 
+            "impactFlesh",
+            "impactMetal", 
+            "impactWood",
+            "impactConcrete"
+        };
+
+        foreach (string effectName in effectNames)
+        {
+            GameObject effect = Resources.Load<GameObject>(effectName);
+            if (effect != null)
+            {
+                Debug.Log($"Found effect: {effectName}");
+                PhotonView pv = effect.GetComponent<PhotonView>();
+                if (pv != null)
+                {
+                    Debug.Log($"{effectName} has PhotonView component");
+                }
+                else
+                {
+                    Debug.LogError($"{effectName} is missing PhotonView component!");
+                }
+            }
+            else
+            {
+                Debug.LogError($"Could not find effect: {effectName} in Resources folder");
+            }
+        }
     }
 
 }
