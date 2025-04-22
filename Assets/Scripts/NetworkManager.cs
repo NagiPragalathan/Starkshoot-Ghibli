@@ -54,7 +54,7 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
 
     [Header("NPC Settings")]
     [SerializeField] private GameObject npcPrefab;
-    [SerializeField] private int maxNPCs = 5;
+    [SerializeField] public int maxNPCs = 3;
     [SerializeField] private float npcSpawnDelay = 5f;
 
     private GameObject player;
@@ -96,7 +96,6 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     private HashSet<string> processedKills = new HashSet<string>();
 
     // Add these at the top of the NetworkManager class
-    private const int MAX_NPCS = 4; // Exactly 4 NPCs at all times
     private List<GameObject> activeNPCs = new List<GameObject>();
     private List<GameObject> deadNPCs = new List<GameObject>();
     private float npcCleanupInterval = 3f; // Check and cleanup every 3 seconds
@@ -232,7 +231,7 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         Debug.Log($"Room list updated. Total rooms: {rooms.Count}");
         
         foreach (RoomInfo room in rooms) {
-            if (room.RemovedFromList) {
+            if (room.RemovedFromList) { 
                 cachedRoomList.Remove(room.Name);
                 roomPlayerCounts.Remove(room.Name);
                 continue;
@@ -1230,11 +1229,18 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         GameObject[] npcs = GameObject.FindGameObjectsWithTag("NPC");
         int currentNPCCount = npcs.Length;
 
-        // Always maintain at least maxNPCs in the game
-        for (int i = currentNPCCount; i < maxNPCs; i++)
+        // If we have too many NPCs, clean them up
+        if (currentNPCCount > maxNPCs)
+        {
+            CleanupAndMaintainNPCs();
+            return;
+        }
+
+        // Only spawn if we have less than maxNPCs
+        if (currentNPCCount < maxNPCs)
         {
             SpawnNPC();
-            Debug.Log($"Maintaining NPC count: Spawned new NPC. Count: {i+1}/{maxNPCs}");
+            Debug.Log($"Maintaining NPC count: Spawned new NPC. Count: {currentNPCCount + 1}/{maxNPCs}");
         }
     }
 
@@ -1245,8 +1251,8 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         // Add a message that bots are joining the battle
         AddMessage("Bots are joining the battle!");
         
-        // Spawn NPCs with a slight delay to ensure everything is set up
-        for (int i = 0; i < 3; i++)
+        // Spawn exactly maxNPCs NPCs
+        for (int i = 0; i < maxNPCs; i++)
         {
             SpawnNPC();
             yield return new WaitForSeconds(0.5f); // Small delay between spawns
@@ -1257,98 +1263,23 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     {
         if (!PhotonNetwork.IsMasterClient) return;
         
-        // Instead of immediately spawning, let the maintenance routine handle it
-        CleanupAndMaintainNPCs();
+        // Wait a short delay before spawning a new NPC
+        StartCoroutine(DelayedRespawn());
     }
 
-    private void CleanupAndMaintainNPCs()
+    private IEnumerator DelayedRespawn()
     {
-        // Clean up our tracking lists first
-        activeNPCs.RemoveAll(npc => npc == null);
-        deadNPCs.RemoveAll(npc => npc == null);
-
-        // Find all NPCs in the scene
-        GameObject[] allNPCs = GameObject.FindGameObjectsWithTag("NPC");
+        yield return new WaitForSeconds(2f); // Wait 2 seconds before respawning
         
-        // Update our active and dead NPC lists
-        foreach (GameObject npc in allNPCs)
-        {
+        GameObject[] npcs = GameObject.FindGameObjectsWithTag("NPC");
+        int activeCount = npcs.Count(npc => {
             NPCHealth health = npc.GetComponent<NPCHealth>();
-            if (health != null)
-            {
-                if (health.IsDead())
-                {
-                    if (!deadNPCs.Contains(npc))
-                    {
-                        deadNPCs.Add(npc);
-                    }
-                    if (activeNPCs.Contains(npc))
-                    {
-                        activeNPCs.Remove(npc);
-                    }
-                }
-                else
-                {
-                    if (!activeNPCs.Contains(npc))
-                    {
-                        activeNPCs.Add(npc);
-                    }
-                }
-            }
-        }
+            return health != null && !health.IsDead();
+        });
 
-        Debug.Log($"NPC Status - Active: {activeNPCs.Count}, Dead: {deadNPCs.Count}, Total: {allNPCs.Length}");
-
-        // Clean up dead NPCs
-        foreach (GameObject deadNPC in deadNPCs.ToArray())
+        if (activeCount < maxNPCs)
         {
-            if (deadNPC != null)
-            {
-                PhotonNetwork.Destroy(deadNPC);
-                deadNPCs.Remove(deadNPC);
-                Debug.Log("Cleaned up dead NPC");
-            }
-        }
-
-        // Spawn new NPCs until we reach MAX_NPCS
-        int npcsNeeded = MAX_NPCS - activeNPCs.Count;
-        Debug.Log($"Need to spawn {npcsNeeded} new NPCs to maintain {MAX_NPCS} total");
-
-        for (int i = 0; i < npcsNeeded; i++)
-        {
-            SpawnNewNPC();
-        }
-    }
-
-    private void SpawnNewNPC()
-    {
-        if (!PhotonNetwork.IsMasterClient) return;
-
-        // Get a random spawn point
-        Transform spawnPoint = spawnPoints[Random.Range(0, spawnPoints.Length)];
-        Vector3 spawnPosition = spawnPoint.position;
-        Quaternion spawnRotation = spawnPoint.rotation;
-
-        // Verify spawn point is on NavMesh
-        NavMeshHit hit;
-        if (NavMesh.SamplePosition(spawnPosition, out hit, 1.0f, NavMesh.AllAreas))
-        {
-            spawnPosition = hit.position;
-        }
-
-        // Spawn the NPC
-        GameObject npc = PhotonNetwork.Instantiate(npcPrefab.name, spawnPosition, spawnRotation, 0);
-        if (npc != null)
-        {
-            activeNPCs.Add(npc);
-            Debug.Log($"Spawned new NPC. Active NPCs: {activeNPCs.Count}");
-            
-            // Initialize the NPC
-            NPCHealth health = npc.GetComponent<NPCHealth>();
-            if (health != null)
-            {
-                health.InitializeNPC();
-            }
+            SpawnNPC();
         }
     }
 
@@ -1505,6 +1436,68 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
                 CleanupAndMaintainNPCs();
             }
             yield return new WaitForSeconds(npcCleanupInterval);
+        }
+    }
+
+    private void CleanupAndMaintainNPCs()
+    {
+        if (!PhotonNetwork.IsMasterClient) return;
+
+        // Clean up our tracking lists first
+        activeNPCs.RemoveAll(npc => npc == null);
+        deadNPCs.RemoveAll(npc => npc == null);
+
+        // Find all NPCs in the scene
+        GameObject[] allNPCs = GameObject.FindGameObjectsWithTag("NPC");
+        
+        // Clear our lists before rebuilding them
+        activeNPCs.Clear();
+        deadNPCs.Clear();
+        
+        // Update our active and dead NPC lists
+        foreach (GameObject npc in allNPCs)
+        {
+            NPCHealth health = npc.GetComponent<NPCHealth>();
+            if (health != null)
+            {
+                if (health.IsDead())
+                {
+                    deadNPCs.Add(npc);
+                    // Immediately destroy dead NPCs
+                    PhotonNetwork.Destroy(npc);
+                }
+                else
+                {
+                    activeNPCs.Add(npc);
+                }
+            }
+        }
+
+        Debug.Log($"NPC Status - Active: {activeNPCs.Count}, Dead: {deadNPCs.Count}, Total: {allNPCs.Length}");
+
+        // If we have too many active NPCs, destroy the excess ones
+        while (activeNPCs.Count > maxNPCs)
+        {
+            if (activeNPCs.Count > 0)
+            {
+                GameObject npcToRemove = activeNPCs[activeNPCs.Count - 1];
+                activeNPCs.RemoveAt(activeNPCs.Count - 1);
+                if (npcToRemove != null)
+                {
+                    PhotonNetwork.Destroy(npcToRemove);
+                }
+            }
+        }
+
+        // Only spawn new NPCs if we have less than maxNPCs active
+        int npcsNeeded = maxNPCs - activeNPCs.Count;
+        if (npcsNeeded > 0)
+        {
+            Debug.Log($"Spawning {npcsNeeded} new NPCs to maintain {maxNPCs} total");
+            for (int i = 0; i < npcsNeeded; i++)
+            {
+                SpawnNPC();
+            }
         }
     }
 

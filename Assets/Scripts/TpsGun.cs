@@ -39,7 +39,12 @@ public class TpsGun : MonoBehaviourPunCallbacks, IPunObservable {
     /// </summary>
     void Update() {
         if (photonView.IsMine) {
-            transform.rotation = fpsGun.transform.rotation;
+            if (fpsGun != null) {
+                transform.rotation = fpsGun.transform.rotation;
+            } else {
+                Debug.LogWarning("FpsGun reference is missing in TpsGun component. Please assign it in the Inspector.");
+                fpsGun = GetComponentInParent<FpsGun>();
+            }
         }
     }
 
