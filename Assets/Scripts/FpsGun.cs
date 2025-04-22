@@ -69,7 +69,7 @@ public class FpsGun : MonoBehaviour {
 
             if (hitObject.CompareTag("NPC"))
             {
-                // Try to get NPCHealth
+                // FIXED: Use NPCHealth instead of NPCController
                 NPCHealth npcHealth = hitObject.GetComponent<NPCHealth>();
                 if (npcHealth != null && npcHealth.photonView != null)
                 {

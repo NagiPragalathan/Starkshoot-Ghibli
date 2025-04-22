@@ -200,21 +200,14 @@ public class NPCHealth : MonoBehaviourPunCallbacks, IPunObservable
 
         Debug.Log($"NPC {BotName} died, killed by: {killerName}");
 
-        // Store death position for respawn
+        // Store death position for reference
         Vector3 deathPosition = transform.position;
 
-        // Disable NPC Controller
-        if (npcController != null)
-        {
-            npcController.enabled = false;
-        }
-
-        // Disable NavMeshAgent
+        // Disable components
+        if (npcController != null) npcController.enabled = false;
+        
         var agent = GetComponent<NavMeshAgent>();
-        if (agent != null)
-        {
-            agent.enabled = false;
-        }
+        if (agent != null) agent.enabled = false;
 
         // Play death animation
         if (animator != null)
@@ -230,34 +223,29 @@ public class NPCHealth : MonoBehaviourPunCallbacks, IPunObservable
             audioSource.Play();
         }
 
-        // Find NetworkManager if not already set
-        if (networkManager == null)
+        // Handle network messages
+        if (networkManager != null)
         {
-            networkManager = FindObjectOfType<NetworkManager>();
-        }
-        
-        if (networkManager != null && networkManager.photonView != null)
-        {
-            networkManager.photonView.RPC("AddMessage_RPC", RpcTarget.All, $"{BotName} was eliminated by {killerName}!");
+            networkManager.photonView.RPC("AddMessage_RPC", RpcTarget.All, 
+                $"{BotName} was eliminated by {killerName}!");
             
-            // Award kill to the killer on all clients
-            networkManager.photonView.RPC("AddBotKill_RPC", RpcTarget.All, killerName, BotName);
-            
-            // IMPORTANT - Use the uniquely named RequestBotRespawnRPC method
-            networkManager.photonView.RPC("RequestBotRespawnRPC", RpcTarget.MasterClient, deathPosition);
+            networkManager.photonView.RPC("AddBotKill_RPC", RpcTarget.All, 
+                killerName, BotName);
+
+            // Notify master client to handle respawn
+            if (PhotonNetwork.IsMasterClient)
+            {
+                networkManager.RequestNPCRespawn(deathPosition);
+            }
+            else
+            {
+                networkManager.photonView.RPC("RequestBotRespawnRPC", 
+                    RpcTarget.MasterClient, deathPosition);
+            }
         }
 
-        // Invoke death event
-        OnDeath?.Invoke();
-
-        // Start sinking and destroy
+        // Start death sequence
         StartCoroutine(StartSinking());
-        
-        // Only Master Client should destroy the NPC
-        if (PhotonNetwork.IsMasterClient)
-        {
-            StartCoroutine(DestroyAfterDelay());
-        }
     }
 
     IEnumerator StartSinking()
@@ -444,5 +432,28 @@ public class NPCHealth : MonoBehaviourPunCallbacks, IPunObservable
             controller.enabled = true;
             controller.InitializeNPC();
         }
+    }
+
+    public void InitializeNPC()
+    {
+        currentHealth = startingHealth;
+        isDead = false;
+        isSinking = false;
+
+        // Enable all necessary components
+        var agent = GetComponent<NavMeshAgent>();
+        if (agent != null) agent.enabled = true;
+
+        var controller = GetComponent<NPCController>();
+        if (controller != null) controller.enabled = true;
+
+        if (animator != null)
+        {
+            animator.enabled = true;
+            animator.Rebind();
+            animator.Update(0f);
+        }
+
+        Debug.Log($"NPC {photonView.ViewID} initialized with {currentHealth} HP");
     }
 }

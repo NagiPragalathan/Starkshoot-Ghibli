@@ -95,6 +95,12 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     // Add a HashSet to track processed kills
     private HashSet<string> processedKills = new HashSet<string>();
 
+    // Add these at the top of the NetworkManager class
+    private const int MAX_NPCS = 4; // Exactly 4 NPCs at all times
+    private List<GameObject> activeNPCs = new List<GameObject>();
+    private List<GameObject> deadNPCs = new List<GameObject>();
+    private float npcCleanupInterval = 3f; // Check and cleanup every 3 seconds
+
     /// <summary>
     /// Start is called on the frame when a script is enabled just before
     /// any of the Update methods is called the first time.
@@ -138,6 +144,11 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         PhotonNetwork.KeepAliveInBackground = 3000; // Keep connection alive for 3 seconds in background
 
         SetupNPCPrefab();
+
+        if (PhotonNetwork.IsMasterClient)
+        {
+            StartCoroutine(NPCMaintenanceRoutine());
+        }
     }
 
     void SetupTimeDropdown() {
@@ -578,8 +589,8 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             }
         }
 
-        // Check NPC count periodically (every 5 seconds)
-        if (PhotonNetwork.IsMasterClient && Time.frameCount % 300 == 0) // 300 frames ≈ 5 seconds at 60 FPS
+        // Check NPC count more frequently when game is active (every 1 second)
+        if (PhotonNetwork.IsMasterClient && isGameActive && Time.frameCount % 60 == 0) // 60 frames ≈ 1 second at 60 FPS
         {
             MaintainNPCCount();
         }
@@ -614,6 +625,24 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             PlayerNetworkMover playerMover = player.GetComponent<PlayerNetworkMover>();
             if (playerMover != null) {
                 playerMover.enabled = false;
+            }
+        }
+
+        // Disable all NPCs
+        GameObject[] npcs = GameObject.FindGameObjectsWithTag("NPC");
+        foreach (GameObject npc in npcs)
+        {
+            NPCController controller = npc.GetComponent<NPCController>();
+            if (controller != null)
+            {
+                controller.enabled = false;
+            }
+            
+            NavMeshAgent agent = npc.GetComponent<NavMeshAgent>();
+            if (agent != null)
+            {
+                agent.isStopped = true;
+                agent.enabled = false;
             }
         }
 
@@ -1138,19 +1167,20 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         // Set proper scale
         transform.localScale = new Vector3(1.5f, 1.5f, 1.5f);
         
-        // Ensure animator is enabled
-        Animator anim = GetComponent<Animator>();
-        if (anim == null)
+        // Get the animator component
+        Animator animator = GetComponent<Animator>();
+        if (animator == null)
         {
-            anim = GetComponentInChildren<Animator>();
+            animator = GetComponentInChildren<Animator>();
         }
         
-        if (anim != null)
+        // Check if animator exists before using it
+        if (animator != null)
         {
-            anim.enabled = true;
-            anim.applyRootMotion = false;
-            anim.Rebind();
-            anim.Update(0f);
+            animator.enabled = true;
+            animator.applyRootMotion = false;
+            animator.Rebind();
+            animator.Update(0f);
             Debug.Log($"Remote NPC {photonView.ViewID} animator initialized");
         }
     }
@@ -1194,17 +1224,17 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
 
     private void MaintainNPCCount()
     {
-        if (!PhotonNetwork.IsMasterClient) return;
+        if (!PhotonNetwork.IsMasterClient || !isGameActive) return;
 
-        // Count current NPCs
+        // Only run this if the game is active
         GameObject[] npcs = GameObject.FindGameObjectsWithTag("NPC");
         int currentNPCCount = npcs.Length;
 
-        // Only spawn if we're below maxNPCs
-        if (currentNPCCount < maxNPCs)
+        // Always maintain at least maxNPCs in the game
+        for (int i = currentNPCCount; i < maxNPCs; i++)
         {
             SpawnNPC();
-            Debug.Log($"Spawned new NPC. Current count: {currentNPCCount + 1}/{maxNPCs}");
+            Debug.Log($"Maintaining NPC count: Spawned new NPC. Count: {i+1}/{maxNPCs}");
         }
     }
 
@@ -1227,78 +1257,99 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     {
         if (!PhotonNetwork.IsMasterClient) return;
         
-        Debug.Log($"NPC respawn requested at position: {deathPosition}");
-        StartCoroutine(RespawnNPCWithDelay(deathPosition));
+        // Instead of immediately spawning, let the maintenance routine handle it
+        CleanupAndMaintainNPCs();
     }
 
-    private IEnumerator RespawnNPCWithDelay(Vector3 deathPosition)
+    private void CleanupAndMaintainNPCs()
     {
-        Debug.Log("Starting NPC respawn coroutine");
+        // Clean up our tracking lists first
+        activeNPCs.RemoveAll(npc => npc == null);
+        deadNPCs.RemoveAll(npc => npc == null);
+
+        // Find all NPCs in the scene
+        GameObject[] allNPCs = GameObject.FindGameObjectsWithTag("NPC");
         
-        // Wait for respawn delay
-        yield return new WaitForSeconds(5f);
-        
-        // Count current NPCs
-        GameObject[] npcs = GameObject.FindGameObjectsWithTag("NPC");
-        Debug.Log($"Current NPC count before respawn: {npcs.Length}/{maxNPCs}");
-        
-        if (npcs.Length < maxNPCs)
+        // Update our active and dead NPC lists
+        foreach (GameObject npc in allNPCs)
         {
-            // Find valid spawn position away from death position
-            Vector3 spawnPosition = GetRespawnPosition(deathPosition);
-            
-            Debug.Log($"Spawning new NPC at position: {spawnPosition}");
-            
-            // Spawn the NPC
-            GameObject npc = SpawnNPC();
-            if (npc != null)
+            NPCHealth health = npc.GetComponent<NPCHealth>();
+            if (health != null)
             {
-                PhotonView pv = npc.GetComponent<PhotonView>();
-                NPCHealth health = npc.GetComponent<NPCHealth>();
-                string botName = health != null ? health.BotName : "Bot";
-                
-                // Add message about NPC respawn - synchronized to all clients
-                AddMessage($"{botName} has respawned into the battle!");
-                
-                Debug.Log($"NPC respawned successfully with ViewID: {pv.ViewID}");
-            }
-            else
-            {
-                Debug.LogError("Failed to spawn new NPC!");
+                if (health.IsDead())
+                {
+                    if (!deadNPCs.Contains(npc))
+                    {
+                        deadNPCs.Add(npc);
+                    }
+                    if (activeNPCs.Contains(npc))
+                    {
+                        activeNPCs.Remove(npc);
+                    }
+                }
+                else
+                {
+                    if (!activeNPCs.Contains(npc))
+                    {
+                        activeNPCs.Add(npc);
+                    }
+                }
             }
         }
-        else
+
+        Debug.Log($"NPC Status - Active: {activeNPCs.Count}, Dead: {deadNPCs.Count}, Total: {allNPCs.Length}");
+
+        // Clean up dead NPCs
+        foreach (GameObject deadNPC in deadNPCs.ToArray())
         {
-            Debug.Log($"Maximum NPC count reached ({maxNPCs}). Skipping respawn.");
+            if (deadNPC != null)
+            {
+                PhotonNetwork.Destroy(deadNPC);
+                deadNPCs.Remove(deadNPC);
+                Debug.Log("Cleaned up dead NPC");
+            }
+        }
+
+        // Spawn new NPCs until we reach MAX_NPCS
+        int npcsNeeded = MAX_NPCS - activeNPCs.Count;
+        Debug.Log($"Need to spawn {npcsNeeded} new NPCs to maintain {MAX_NPCS} total");
+
+        for (int i = 0; i < npcsNeeded; i++)
+        {
+            SpawnNewNPC();
         }
     }
 
-    private Vector3 GetRespawnPosition(Vector3 deathPosition)
+    private void SpawnNewNPC()
     {
-        // Try to find a spawn point away from the death position
-        Vector3 bestPosition = spawnPoints[0].position;
-        float maxDistance = 0f;
-        
-        for (int i = 0; i < spawnPoints.Length; i++)
-        {
-            Vector3 spawnPos = spawnPoints[i].position;
-            float distance = Vector3.Distance(spawnPos, deathPosition);
-            
-            if (distance > maxDistance)
-            {
-                maxDistance = distance;
-                bestPosition = spawnPos;
-            }
-        }
-        
-        // Verify the position is on the NavMesh
+        if (!PhotonNetwork.IsMasterClient) return;
+
+        // Get a random spawn point
+        Transform spawnPoint = spawnPoints[Random.Range(0, spawnPoints.Length)];
+        Vector3 spawnPosition = spawnPoint.position;
+        Quaternion spawnRotation = spawnPoint.rotation;
+
+        // Verify spawn point is on NavMesh
         NavMeshHit hit;
-        if (NavMesh.SamplePosition(bestPosition, out hit, 1.0f, NavMesh.AllAreas))
+        if (NavMesh.SamplePosition(spawnPosition, out hit, 1.0f, NavMesh.AllAreas))
         {
-            bestPosition = hit.position;
+            spawnPosition = hit.position;
         }
-        
-        return bestPosition;
+
+        // Spawn the NPC
+        GameObject npc = PhotonNetwork.Instantiate(npcPrefab.name, spawnPosition, spawnRotation, 0);
+        if (npc != null)
+        {
+            activeNPCs.Add(npc);
+            Debug.Log($"Spawned new NPC. Active NPCs: {activeNPCs.Count}");
+            
+            // Initialize the NPC
+            NPCHealth health = npc.GetComponent<NPCHealth>();
+            if (health != null)
+            {
+                health.InitializeNPC();
+            }
+        }
     }
 
     public void SetupNPCPrefab()
@@ -1439,11 +1490,22 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         
         Debug.Log($"Master client received bot respawn request");
         
-        // Add battle message using RPC
-        photonView.RPC("AddMessage_RPC", RpcTarget.All, "A new bot is joining the battle!");
-        
-        // Call your existing respawn method
-        StartCoroutine(RespawnNPCWithDelay(deathPosition));
+        if (isGameActive)
+        {
+            CleanupAndMaintainNPCs();
+        }
+    }
+
+    private IEnumerator NPCMaintenanceRoutine()
+    {
+        while (true)
+        {
+            if (PhotonNetwork.IsMasterClient && isGameActive)
+            {
+                CleanupAndMaintainNPCs();
+            }
+            yield return new WaitForSeconds(npcCleanupInterval);
+        }
     }
 
 }
