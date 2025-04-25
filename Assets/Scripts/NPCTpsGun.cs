@@ -201,17 +201,17 @@ public class NPCTpsGun : MonoBehaviourPunCallbacks, IPunObservable
         direction = direction.normalized;
 
         // Spawn bullet with horizontal rotation only
-        Quaternion bulletRotation = Quaternion.LookRotation(direction) * Quaternion.Euler(0, 90, 0); // Rotate 90 degrees to make capsule horizontal
+        Quaternion bulletRotation = Quaternion.LookRotation(direction) * Quaternion.Euler(0, 90, 0);
         GameObject bullet = Instantiate(bulletPrefab, bulletSpawnPoint.position, bulletRotation);
 
-        // Lock the bullet's rotation
+        // Set up rigidbody
         Rigidbody rb = bullet.GetComponent<Rigidbody>();
         if (rb == null)
         {
             rb = bullet.AddComponent<Rigidbody>();
         }
         rb.useGravity = false;
-        rb.constraints = RigidbodyConstraints.FreezeRotation; // Prevent rotation
+        rb.constraints = RigidbodyConstraints.FreezeRotation;
         rb.velocity = direction * bulletSpeed;
 
         // Add trail renderer if specified
@@ -221,15 +221,15 @@ public class NPCTpsGun : MonoBehaviourPunCallbacks, IPunObservable
             if (trail == null)
             {
                 trail = bullet.AddComponent<TrailRenderer>();
-                trail.time = 0.1f;
+                trail.time = 0.05f; // Shorter trail time
                 trail.startWidth = 0.05f;
                 trail.endWidth = 0.0f;
                 trail.material = bulletTrail.material;
             }
         }
 
-        // Destroy bullet after lifetime
-        Destroy(bullet, bulletLifetime);
+        // Destroy bullet after a short time if it doesn't hit anything
+        Destroy(bullet, 1f); // Reduced from previous lifetime
     }
 
     private void ShowMuzzleFlash()

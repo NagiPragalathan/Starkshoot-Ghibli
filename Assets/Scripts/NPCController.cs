@@ -233,6 +233,14 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
         {
             if (col.CompareTag("Player"))
             {
+                // Check if player is dead first
+                PlayerHealth playerHealth = col.GetComponent<PlayerHealth>();
+                if (playerHealth != null && playerHealth.IsDead())
+                {
+                    // Skip dead players
+                    continue;
+                }
+
                 foundPlayer = true;
                 float distance = Vector3.Distance(transform.position, col.transform.position);
                 
@@ -253,8 +261,8 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
                     if (npcGun != null)
                     {
                         npcGun.UpdateAiming(col.transform.position);
-                        // Only shoot if we're properly aimed
-                        if (IsAimedAtTarget(col.transform.position))
+                        // Only shoot if we're properly aimed AND player is alive
+                        if (IsAimedAtTarget(col.transform.position) && !playerHealth.IsDead())
                         {
                             Attack(col.gameObject);
                             npcGun.Shoot();
@@ -304,8 +312,16 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
         return angle < 30f; // Adjust this value to control aim accuracy
     }
 
+    private bool IsPlayerAlive(GameObject player)
+    {
+        PlayerHealth playerHealth = player.GetComponent<PlayerHealth>();
+        return playerHealth != null && !playerHealth.IsDead();
+    }
+
     private void Attack(GameObject player)
     {
+        if (!IsPlayerAlive(player)) return;
+
         // Play attack/shoot animation
         photonView.RPC("PlayShootAnimation", RpcTarget.All);
 

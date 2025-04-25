@@ -190,4 +190,9 @@ public class PlayerHealth : MonoBehaviourPunCallbacks, IPunObservable {
         }
     }
 
+    public bool IsDead()
+    {
+        return isDead;
+    }
+
 }
