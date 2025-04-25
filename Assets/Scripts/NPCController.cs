@@ -41,6 +41,9 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
     private int hashDieTrigger;
     private int hashShootTrigger;
 
+    private NPCTpsGun npcGun;
+    private Transform currentTarget;
+
     private void Awake()
     {
         // Get components
@@ -84,6 +87,7 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
         {
             InitializeNPC();
         }
+        npcGun = GetComponentInChildren<NPCTpsGun>();
     }
 
     public void InitializeNPC()
@@ -235,29 +239,69 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
                 // If player is within attack range
                 if (distance <= attackRange)
                 {
+                    // Stop the NPC while shooting
+                    if (agent != null)
+                    {
+                        agent.isStopped = true;
+                        isMoving = false;
+                    }
+
                     // Face the player
                     Vector3 directionToPlayer = (col.transform.position - transform.position).normalized;
                     transform.rotation = Quaternion.LookRotation(directionToPlayer);
 
-                    // Attack
-                    Attack(col.gameObject);
-                    nextAttackTime = Time.time + attackCooldown;
+                    if (npcGun != null)
+                    {
+                        npcGun.UpdateAiming(col.transform.position);
+                        // Only shoot if we're properly aimed
+                        if (IsAimedAtTarget(col.transform.position))
+                        {
+                            Attack(col.gameObject);
+                            npcGun.Shoot();
+                            nextAttackTime = Time.time + attackCooldown;
+                        }
+                    }
                     break;
                 }
                 // If player is detected but not in attack range, move towards them
                 else if (distance <= detectionRange)
                 {
-                    agent.SetDestination(col.transform.position);
-                    isMoving = true;
+                    if (agent != null)
+                    {
+                        agent.isStopped = false;
+                        agent.SetDestination(col.transform.position);
+                        isMoving = true;
+                    }
+                    if (npcGun != null)
+                    {
+                        npcGun.UpdateAiming(col.transform.position);
+                    }
                 }
             }
         }
         
-        // If no player found, and we were previously chasing, resume patrol
-        if (!foundPlayer && isMoving && !agent.hasPath)
+        if (!foundPlayer)
         {
-            isMoving = false;
+            if (agent != null)
+            {
+                agent.isStopped = false;
+            }
+            if (npcGun != null)
+            {
+                npcGun.ResetAiming();
+            }
+            if (isMoving && !agent.hasPath)
+            {
+                isMoving = false;
+            }
         }
+    }
+
+    private bool IsAimedAtTarget(Vector3 targetPosition)
+    {
+        Vector3 directionToTarget = (targetPosition - transform.position).normalized;
+        float angle = Vector3.Angle(transform.forward, directionToTarget);
+        return angle < 30f; // Adjust this value to control aim accuracy
     }
 
     private void Attack(GameObject player)
