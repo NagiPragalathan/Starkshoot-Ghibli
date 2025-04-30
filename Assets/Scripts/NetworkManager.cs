@@ -82,6 +82,7 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     private Dictionary<string, int> botKills = new Dictionary<string, int>();
 
     // Add this class to track player statistics
+    [System.Serializable]
     private class PlayerStats {
         public int Score { get; set; }
         public int Kills { get; set; }
@@ -89,6 +90,12 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         public PlayerStats() {
             Score = 0;
             Kills = 0;
+        }
+
+        // Add constructor for serialization
+        public PlayerStats(int score, int kills) {
+            Score = score;
+            Kills = kills;
         }
     }
 
@@ -99,6 +106,16 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     private List<GameObject> activeNPCs = new List<GameObject>();
     private List<GameObject> deadNPCs = new List<GameObject>();
     private float npcCleanupInterval = 3f; // Check and cleanup every 3 seconds
+
+    [SerializeField]
+    private Button backButton; // Add reference to back button
+
+    private bool isLeaderboardOpen = false;
+
+    [SerializeField]
+    private Camera lobbyCamera; // Reference to the lobby/main menu camera
+
+    private bool shouldReconnectAfterReset = false;
 
     /// <summary>
     /// Start is called on the frame when a script is enabled just before
@@ -209,6 +226,12 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             isGameActive = false;
             Cursor.lockState = CursorLockMode.None;
             Cursor.visible = true;
+        }
+
+        if (shouldReconnectAfterReset)
+        {
+            shouldReconnectAfterReset = false;
+            PhotonNetwork.ConnectUsingSettings();
         }
     }
 
@@ -346,34 +369,20 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         if (PhotonNetwork.IsMasterClient) {
             isGameActive = true;
             photonView.RPC("SyncTimer", RpcTarget.All, currentGameTime);
+            
+            // Master client should sync all player stats to the new player
+            SyncStatsToNewPlayer(PhotonNetwork.LocalPlayer);
+        } else {
+            // Request stats sync from master client
+            photonView.RPC("RequestStatsSync", RpcTarget.MasterClient, PhotonNetwork.LocalPlayer);
         }
+        
+        // Initialize local player's stats
+        InitializePlayerStats();
         
         Respawn(0.0f);
-        
-        // Initialize stats when joining room
-        InitializePlayerStats();
-
-        // Update the room player count immediately when someone joins
-        string roomName = PhotonNetwork.CurrentRoom.Name;
-        if (roomPlayerCounts.ContainsKey(roomName)) {
-            roomPlayerCounts[roomName] = PhotonNetwork.CurrentRoom.PlayerCount;
-            photonView.RPC("UpdateRoomPlayerCount", RpcTarget.All, roomName, PhotonNetwork.CurrentRoom.PlayerCount);
-        }
-
-        if (isReconnecting) {
-            Debug.Log("Successfully rejoined room after reconnection");
-            isReconnecting = false;
-            wasInRoom = false;
-            lastRoomName = null;
-            
-            // Restore player state if needed
-            RestorePlayerState();
-        }
-
-        if (PhotonNetwork.IsMasterClient)
-        {
-            // Spawn NPCs with a slight delay to ensure everything is set up
-            StartCoroutine(SpawnInitialNPCs());
+        if (lobbyCamera != null) {
+            lobbyCamera.enabled = false;
         }
     }
 
@@ -385,6 +394,9 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         sightImage.SetActive(false);
         sceneCamera.enabled = true;
         StartCoroutine(RespawnCoroutine(spawnTime));
+        if (lobbyCamera != null) {
+            lobbyCamera.enabled = false;
+        }
     }
 
     /// <summary>
@@ -473,11 +485,8 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         Debug.Log($"UpdatePlayerStats_RPC received for {playerName}. Score: {score}, Kills: {kills}");
         
         if (!playerStats.ContainsKey(playerName)) {
-            playerStats[playerName] = new PlayerStats();
+            playerStats[playerName] = new PlayerStats(score, kills);
         }
-        
-        playerStats[playerName].Score = score;
-        playerStats[playerName].Kills = kills;
         
         // Update UI for the local player
         if (playerName == PhotonNetwork.LocalPlayer.NickName) {
@@ -599,6 +608,14 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         {
             MaintainNPCCount();
         }
+
+        // Force cursor to stay visible/unlocked if leaderboard is open
+        if (isLeaderboardOpen) {
+            if (Cursor.lockState != CursorLockMode.None || !Cursor.visible) {
+                Cursor.lockState = CursorLockMode.None;
+                Cursor.visible = true;
+            }
+        }
     }
 
     [PunRPC]
@@ -661,17 +678,12 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
 
     private IEnumerator ShowLeaderboardDelayed() {
         yield return new WaitForSeconds(0.1f); // Small delay to ensure proper setup
-        ShowLeaderboard();
+        ShowFinalLeaderboard();
     }
 
-    void ShowLeaderboard() {
-        if (leaderboardPanel == null || leaderboardContent == null) {
-            Debug.LogError("Leaderboard panel or content is null!");
-            return;
-        }
-
-        Debug.Log("Showing leaderboard...");
-        Debug.Log($"Total players to show: {playerStats.Count}");
+    // Show the leaderboard and unlock cursor
+    void ShowFinalLeaderboard() {
+        if (leaderboardContent == null || leaderboardPanel == null) return;
 
         // Clear existing entries
         foreach (Transform child in leaderboardContent) {
@@ -680,60 +692,57 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             }
         }
 
-        // Sort players by score and kills, but skip empty player names
-        var sortedPlayers = playerStats
-            .Where(p => !string.IsNullOrWhiteSpace(p.Key))
-            .OrderByDescending(p => p.Value.Score)
-            .ThenByDescending(p => p.Value.Kills)
-            .ToList();
+        // Sort players by score
+        var sortedPlayers = playerStats.OrderByDescending(p => p.Value.Score)
+                                     .ThenByDescending(p => p.Value.Kills)
+                                     .ToList();
 
-        Debug.Log("Sorted players:");
-        foreach (var player in sortedPlayers) {
-            Debug.Log($"Player: {player.Key}, Score: {player.Value.Score}, Kills: {player.Value.Kills}");
-        }
-
-        int maxEntries = 8;
-        int playerCount = sortedPlayers.Count;
-        for (int i = 0; i < maxEntries; i++) {
+        // Create leaderboard entries
+        for (int i = 0; i < sortedPlayers.Count; i++) {
+            var playerStat = sortedPlayers[i];
             GameObject entry = Instantiate(leaderboardEntryPrefab, leaderboardContent);
             LeaderboardEntry entryScript = entry.GetComponent<LeaderboardEntry>();
-            if (i < playerCount) {
-                var playerStat = sortedPlayers[i];
-                entryScript.SetStats(
-                    playerStat.Key,
-                    playerStat.Value.Score,
-                    playerStat.Value.Kills,
-                    i + 1 // Pass rank (1-based index)
-                );
-            } else {
-                entryScript.SetStats(
-                    "-|-", // Placeholder name
-                    0,      // Placeholder score
-                    0,      // Placeholder kills
-                    i + 1   // Rank
-                );
-                // Optionally, you can set the score and kills text to "-|-" in the LeaderboardEntry script if you want
-                if (entryScript.scoreText != null) entryScript.scoreText.text = "-|-";
-                if (entryScript.killsText != null) entryScript.killsText.text = "-|-";
-            }
+            entryScript.SetStats(
+                playerStat.Key,
+                playerStat.Value.Score,
+                playerStat.Value.Kills,
+                i + 1
+            );
+        }
+        // Fill remaining slots with placeholder entries up to 8
+        for (int i = sortedPlayers.Count; i < 8; i++) {
+            GameObject entry = Instantiate(leaderboardEntryPrefab, leaderboardContent);
+            LeaderboardEntry entryScript = entry.GetComponent<LeaderboardEntry>();
+            entryScript.SetStats("-|-", 0, 0, i + 1);
         }
 
-        // Ensure the panel is visible and in front
         leaderboardPanel.SetActive(true);
-        if (leaderboardPanel.GetComponent<Canvas>() != null) {
-            leaderboardPanel.GetComponent<Canvas>().sortingOrder = 999;
-        }
-
-        // Lock player controls and show cursor when leaderboard is shown
+        isLeaderboardOpen = true;
         Cursor.lockState = CursorLockMode.None;
         Cursor.visible = true;
 
-        // Optionally, disable player movement script
-        if (player != null)
-        {
+        // Disable player controls and all gun scripts
+        if (player != null) {
             var controller = player.GetComponent<FirstPersonController>();
             if (controller != null) controller.enabled = false;
+            foreach (var gun in player.GetComponentsInChildren<FpsGun>(true)) {
+                gun.enabled = false;
+            }
+            foreach (var gun in player.GetComponentsInChildren<TpsGun>(true)) {
+                gun.enabled = false;
+            }
         }
+
+        // Setup back button if it exists
+        if (backButton != null) {
+            backButton.onClick.RemoveAllListeners();
+            backButton.onClick.AddListener(CloseLeaderboard);
+        }
+    }
+
+    // Public method to close leaderboard and show start UI
+    public void CloseLeaderboard() {
+        FullResetGame();
     }
 
     // Add method to reset game timer
@@ -756,52 +765,6 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     [PunRPC]
     void SyncGameState(bool active) {
         isGameActive = active;
-    }
-
-    [PunRPC]
-    void ShowFinalLeaderboard() {
-        if (leaderboardContent == null || leaderboardPanel == null) return;
-
-        // Clear existing entries
-        foreach (Transform child in leaderboardContent) {
-            if (child != null) {
-                Destroy(child.gameObject);
-            }
-        }
-
-        // Sort players by score and kills, but skip empty player names
-        var sortedPlayers = playerStats
-            .Where(p => !string.IsNullOrWhiteSpace(p.Key))
-            .OrderByDescending(p => p.Value.Score)
-            .ThenByDescending(p => p.Value.Kills)
-            .ToList();
-
-        int maxEntries = 8;
-        int playerCount = sortedPlayers.Count;
-        for (int i = 0; i < maxEntries; i++) {
-            GameObject entry = Instantiate(leaderboardEntryPrefab, leaderboardContent);
-            LeaderboardEntry entryScript = entry.GetComponent<LeaderboardEntry>();
-            if (i < playerCount) {
-                var playerStat = sortedPlayers[i];
-                entryScript.SetStats(
-                    playerStat.Key,
-                    playerStat.Value.Score,
-                    playerStat.Value.Kills,
-                    i + 1 // Pass rank (1-based index)
-                );
-            } else {
-                entryScript.SetStats(
-                    "-|-", // Placeholder name
-                    0,      // Placeholder score
-                    0,      // Placeholder kills
-                    i + 1   // Rank
-                );
-                if (entryScript.scoreText != null) entryScript.scoreText.text = "-|-";
-                if (entryScript.killsText != null) entryScript.killsText.text = "-|-";
-            }
-        }
-
-        leaderboardPanel.SetActive(true);
     }
 
     public void ReturnToLobby() {
@@ -1307,7 +1270,7 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
 
     private IEnumerator SpawnInitialNPCs()
     {
-        yield return new WaitForSeconds(1f); // Wait for room to fully initialize
+        yield return new WaitForSeconds(2f); // Wait for players to reset
         
         // Add a message that bots are joining the battle
         AddMessage("Bots are joining the battle!");
@@ -1560,6 +1523,175 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
                 SpawnNPC();
             }
         }
+    }
+
+    // Add method to sync all player stats
+    [PunRPC]
+    private void SyncAllPlayerStats(string[] playerNames, int[] scores, int[] kills) {
+        Debug.Log($"Received SyncAllPlayerStats. Players: {playerNames.Length}");
+        
+        // Clear existing stats
+        playerStats.Clear();
+        
+        // Rebuild player stats from received data
+        for (int i = 0; i < playerNames.Length; i++) {
+            playerStats[playerNames[i]] = new PlayerStats(scores[i], kills[i]);
+            Debug.Log($"Synced stats for {playerNames[i]}: Score={scores[i]}, Kills={kills[i]}");
+        }
+        
+        // Update UI for local player
+        string localPlayer = PhotonNetwork.LocalPlayer.NickName;
+        if (playerStats.ContainsKey(localPlayer)) {
+            UpdateUIStats(playerStats[localPlayer].Score, playerStats[localPlayer].Kills);
+        }
+    }
+
+    [PunRPC]
+    private void RequestStatsSync(Player requestingPlayer) {
+        if (PhotonNetwork.IsMasterClient) {
+            SyncStatsToNewPlayer(requestingPlayer);
+        }
+    }
+
+    private void SyncStatsToNewPlayer(Player targetPlayer) {
+        if (!PhotonNetwork.IsMasterClient) return;
+
+        string[] playerNames = playerStats.Keys.ToArray();
+        int[] scores = playerStats.Values.Select(ps => ps.Score).ToArray();
+        int[] kills = playerStats.Values.Select(ps => ps.Kills).ToArray();
+
+        photonView.RPC("SyncAllPlayerStats", targetPlayer, playerNames, scores, kills);
+    }
+
+    // Add method to handle back button click
+    public void OnBackButtonClicked() {
+        if (PhotonNetwork.IsMasterClient) {
+            // First, destroy all existing NPCs
+            GameObject[] npcs = GameObject.FindGameObjectsWithTag("NPC");
+            foreach (GameObject npc in npcs) {
+                if (npc != null) {
+                    PhotonNetwork.Destroy(npc);
+                }
+            }
+
+            // Clear NPC lists
+            activeNPCs.Clear();
+            deadNPCs.Clear();
+            processedKills.Clear();
+
+            // Reset game state
+            isGameActive = true;
+            currentGameTime = timeOptions[1]; // Reset to default time
+            photonView.RPC("SyncTimer", RpcTarget.All, currentGameTime);
+            
+            // Clear all player stats
+            playerStats.Clear();
+            killStreaks.Clear();
+            botKills.Clear();
+            
+            // Initialize stats for all players
+            foreach (var player in PhotonNetwork.PlayerList) {
+                playerStats[player.NickName] = new PlayerStats();
+                killStreaks[player.NickName] = 0;
+                botKills[player.NickName] = 0;
+            }
+            
+            // Sync initial stats to all clients
+            photonView.RPC("SyncAllPlayerStats", RpcTarget.All, 
+                playerStats.Keys.ToArray(),
+                playerStats.Values.Select(ps => ps.Score).ToArray(),
+                playerStats.Values.Select(ps => ps.Kills).ToArray()
+            );
+
+            // Start spawning new NPCs after a delay
+            StartCoroutine(SpawnInitialNPCs());
+        }
+        
+        // Hide leaderboard
+        if (leaderboardPanel != null) {
+            leaderboardPanel.SetActive(false);
+        }
+        
+        // Reset cursor and player controls
+        Cursor.lockState = CursorLockMode.Locked;
+        Cursor.visible = false;
+        
+        // Enable player movement
+        if (player != null) {
+            var controller = player.GetComponent<FirstPersonController>();
+            if (controller != null) controller.enabled = true;
+        }
+
+        // Reset all players to spawn points
+        photonView.RPC("ResetAllPlayers", RpcTarget.All);
+    }
+
+    [PunRPC]
+    private void ResetAllPlayers() {
+        if (player != null) {
+            // Get a random spawn point
+            int spawnIndex = Random.Range(0, spawnPoints.Length);
+            player.transform.position = spawnPoints[spawnIndex].position;
+            player.transform.rotation = spawnPoints[spawnIndex].rotation;
+
+            // Reset player health if needed
+            var health = player.GetComponent<PlayerHealth>();
+            if (health != null) {
+                health.ResetHealth();
+            }
+        }
+    }
+
+    public void FullResetGame()
+    {
+        // 1. Disconnect from Photon
+        shouldReconnectAfterReset = true;
+        if (PhotonNetwork.IsConnected)
+        {
+            PhotonNetwork.Disconnect();
+        }
+        else
+        {
+            PhotonNetwork.ConnectUsingSettings();
+        }
+
+        // 2. Hide all gameplay UI and panels
+        if (leaderboardPanel != null) leaderboardPanel.SetActive(false);
+        if (messageWindow != null) messageWindow.SetActive(false);
+        if (sightImage != null) sightImage.SetActive(false);
+        if (timerText != null) timerText.gameObject.SetActive(false);
+        if (scoreText != null) scoreText.gameObject.SetActive(false);
+        if (killsText != null) killsText.gameObject.SetActive(false);
+
+        // 3. Show the main menu/start UI
+        if (serverWindow != null) serverWindow.SetActive(true);
+
+        // 4. Disable player and gameplay objects
+        if (player != null) player.SetActive(false);
+
+        // 5. Enable lobby camera
+        if (lobbyCamera != null) lobbyCamera.enabled = true;
+
+        // 6. Clear all game state data
+        playerStats.Clear();
+        killStreaks.Clear();
+        botKills.Clear();
+        processedKills.Clear();
+        activeNPCs.Clear();
+        deadNPCs.Clear();
+
+        // 7. Destroy all NPCs
+        GameObject[] npcs = GameObject.FindGameObjectsWithTag("NPC");
+        foreach (GameObject npc in npcs)
+        {
+            Destroy(npc);
+        }
+
+        // 8. Reset cursor
+        Cursor.lockState = CursorLockMode.None;
+        Cursor.visible = true;
+
+        // 9. Optionally, reset any other static/singleton data here
     }
 
 }

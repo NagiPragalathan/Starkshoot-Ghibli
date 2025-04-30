@@ -195,4 +195,27 @@ public class PlayerHealth : MonoBehaviourPunCallbacks, IPunObservable {
         return isDead;
     }
 
+    public void ResetHealth()
+    {
+        currentHealth = startingHealth;
+        isDead = false;
+        isSinking = false;
+        damaged = false;
+        
+        if (photonView.IsMine)
+        {
+            healthSlider.value = currentHealth;
+            fpController.enabled = true;
+            ikControl.enabled = true;
+            nameTag.gameObject.SetActive(true);
+        }
+        
+        // Reset animator state
+        if (animator != null)
+        {
+            animator.Rebind();
+            animator.Update(0f);
+        }
+    }
+
 }
