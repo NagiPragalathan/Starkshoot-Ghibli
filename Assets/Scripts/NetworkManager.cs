@@ -499,6 +499,9 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         // Debug message
         Debug.Log($"AddKill called for {playerName}. Kills: {playerStats[playerName].Kills}, Score: {currentScore}");
         
+        // Update UI immediately
+        UpdateUIStats(currentScore, playerStats[playerName].Kills);
+        
         // Send update to all clients
         photonView.RPC("UpdatePlayerStats_RPC", RpcTarget.All, 
             playerName, 
@@ -518,6 +521,9 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         
         // Debug message
         Debug.Log($"AddScore called for {playerName}. New Score: {currentScore}");
+        
+        // Update UI immediately
+        UpdateUIStats(currentScore, playerStats[playerName].Kills);
         
         // Send update to all clients
         photonView.RPC("UpdatePlayerStats_RPC", RpcTarget.All, 
@@ -659,7 +665,13 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     }
 
     void ShowLeaderboard() {
-        if (leaderboardPanel == null || leaderboardContent == null) return;
+        if (leaderboardPanel == null || leaderboardContent == null) {
+            Debug.LogError("Leaderboard panel or content is null!");
+            return;
+        }
+
+        Debug.Log("Showing leaderboard...");
+        Debug.Log($"Total players to show: {playerStats.Count}");
 
         // Clear existing entries
         foreach (Transform child in leaderboardContent) {
@@ -668,26 +680,59 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             }
         }
 
-        // Sort players by score and kills
-        var sortedPlayers = playerStats.OrderByDescending(p => p.Value.Score)
-                                     .ThenByDescending(p => p.Value.Kills)
-                                     .ToList();
+        // Sort players by score and kills, but skip empty player names
+        var sortedPlayers = playerStats
+            .Where(p => !string.IsNullOrWhiteSpace(p.Key))
+            .OrderByDescending(p => p.Value.Score)
+            .ThenByDescending(p => p.Value.Kills)
+            .ToList();
 
-        // Create leaderboard entries
-        foreach (var playerStat in sortedPlayers) {
+        Debug.Log("Sorted players:");
+        foreach (var player in sortedPlayers) {
+            Debug.Log($"Player: {player.Key}, Score: {player.Value.Score}, Kills: {player.Value.Kills}");
+        }
+
+        int maxEntries = 8;
+        int playerCount = sortedPlayers.Count;
+        for (int i = 0; i < maxEntries; i++) {
             GameObject entry = Instantiate(leaderboardEntryPrefab, leaderboardContent);
             LeaderboardEntry entryScript = entry.GetComponent<LeaderboardEntry>();
-            entryScript.SetStats(
-                playerStat.Key,
-                playerStat.Value.Score,
-                playerStat.Value.Kills
-            );
+            if (i < playerCount) {
+                var playerStat = sortedPlayers[i];
+                entryScript.SetStats(
+                    playerStat.Key,
+                    playerStat.Value.Score,
+                    playerStat.Value.Kills,
+                    i + 1 // Pass rank (1-based index)
+                );
+            } else {
+                entryScript.SetStats(
+                    "-|-", // Placeholder name
+                    0,      // Placeholder score
+                    0,      // Placeholder kills
+                    i + 1   // Rank
+                );
+                // Optionally, you can set the score and kills text to "-|-" in the LeaderboardEntry script if you want
+                if (entryScript.scoreText != null) entryScript.scoreText.text = "-|-";
+                if (entryScript.killsText != null) entryScript.killsText.text = "-|-";
+            }
         }
 
         // Ensure the panel is visible and in front
         leaderboardPanel.SetActive(true);
         if (leaderboardPanel.GetComponent<Canvas>() != null) {
             leaderboardPanel.GetComponent<Canvas>().sortingOrder = 999;
+        }
+
+        // Lock player controls and show cursor when leaderboard is shown
+        Cursor.lockState = CursorLockMode.None;
+        Cursor.visible = true;
+
+        // Optionally, disable player movement script
+        if (player != null)
+        {
+            var controller = player.GetComponent<FirstPersonController>();
+            if (controller != null) controller.enabled = false;
         }
     }
 
@@ -724,20 +769,36 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             }
         }
 
-        // Sort players by score
-        var sortedPlayers = playerStats.OrderByDescending(p => p.Value.Score)
-                                     .ThenByDescending(p => p.Value.Kills)
-                                     .ToList();
+        // Sort players by score and kills, but skip empty player names
+        var sortedPlayers = playerStats
+            .Where(p => !string.IsNullOrWhiteSpace(p.Key))
+            .OrderByDescending(p => p.Value.Score)
+            .ThenByDescending(p => p.Value.Kills)
+            .ToList();
 
-        // Create leaderboard entries
-        foreach (var playerStat in sortedPlayers) {
+        int maxEntries = 8;
+        int playerCount = sortedPlayers.Count;
+        for (int i = 0; i < maxEntries; i++) {
             GameObject entry = Instantiate(leaderboardEntryPrefab, leaderboardContent);
             LeaderboardEntry entryScript = entry.GetComponent<LeaderboardEntry>();
-            entryScript.SetStats(
-                playerStat.Key,
-                playerStat.Value.Score,
-                playerStat.Value.Kills
-            );
+            if (i < playerCount) {
+                var playerStat = sortedPlayers[i];
+                entryScript.SetStats(
+                    playerStat.Key,
+                    playerStat.Value.Score,
+                    playerStat.Value.Kills,
+                    i + 1 // Pass rank (1-based index)
+                );
+            } else {
+                entryScript.SetStats(
+                    "-|-", // Placeholder name
+                    0,      // Placeholder score
+                    0,      // Placeholder kills
+                    i + 1   // Rank
+                );
+                if (entryScript.scoreText != null) entryScript.scoreText.text = "-|-";
+                if (entryScript.killsText != null) entryScript.killsText.text = "-|-";
+            }
         }
 
         leaderboardPanel.SetActive(true);
