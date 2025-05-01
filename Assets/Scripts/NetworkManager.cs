@@ -57,6 +57,9 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     [SerializeField] public int maxNPCs = 3;
     [SerializeField] private float npcSpawnDelay = 5f;
 
+    [SerializeField]
+    private Button reloadButton;
+
     private GameObject player;
     private Queue<string> messages;
     private const int messageCount = 10;
@@ -82,7 +85,6 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     private Dictionary<string, int> botKills = new Dictionary<string, int>();
 
     // Add this class to track player statistics
-    [System.Serializable]
     private class PlayerStats {
         public int Score { get; set; }
         public int Kills { get; set; }
@@ -90,12 +92,6 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         public PlayerStats() {
             Score = 0;
             Kills = 0;
-        }
-
-        // Add constructor for serialization
-        public PlayerStats(int score, int kills) {
-            Score = score;
-            Kills = kills;
         }
     }
 
@@ -107,15 +103,8 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     private List<GameObject> deadNPCs = new List<GameObject>();
     private float npcCleanupInterval = 3f; // Check and cleanup every 3 seconds
 
-    [SerializeField]
-    private Button backButton; // Add reference to back button
-
-    private bool isLeaderboardOpen = false;
-
-    [SerializeField]
-    private Camera lobbyCamera; // Reference to the lobby/main menu camera
-
-    private bool shouldReconnectAfterReset = false;
+    // Add this at the start of the class, after other private fields
+    private const string PLAYER_STATS_PROP_KEY = "PlayerStats";
 
     /// <summary>
     /// Start is called on the frame when a script is enabled just before
@@ -164,6 +153,30 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         if (PhotonNetwork.IsMasterClient)
         {
             StartCoroutine(NPCMaintenanceRoutine());
+        }
+
+        // Setup reload button
+        if (reloadButton != null)
+        {
+            reloadButton.onClick.RemoveListener(ReloadScene); // Remove any existing listeners first
+            reloadButton.onClick.AddListener(ReloadScene);
+        }
+
+        // Make sure the server window is visible when starting
+        if (serverWindow != null)
+        {
+            serverWindow.SetActive(true);
+        }
+
+        // Initialize connection if not already connected
+        if (!PhotonNetwork.IsConnected)
+        {
+            PhotonNetwork.AutomaticallySyncScene = true;
+            PhotonNetwork.ConnectUsingSettings();
+            if (connectionText != null)
+            {
+                connectionText.text = "Connecting to lobby...";
+            }
         }
     }
 
@@ -226,12 +239,6 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             isGameActive = false;
             Cursor.lockState = CursorLockMode.None;
             Cursor.visible = true;
-        }
-
-        if (shouldReconnectAfterReset)
-        {
-            shouldReconnectAfterReset = false;
-            PhotonNetwork.ConnectUsingSettings();
         }
     }
 
@@ -369,20 +376,34 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         if (PhotonNetwork.IsMasterClient) {
             isGameActive = true;
             photonView.RPC("SyncTimer", RpcTarget.All, currentGameTime);
-            
-            // Master client should sync all player stats to the new player
-            SyncStatsToNewPlayer(PhotonNetwork.LocalPlayer);
-        } else {
-            // Request stats sync from master client
-            photonView.RPC("RequestStatsSync", RpcTarget.MasterClient, PhotonNetwork.LocalPlayer);
         }
         
-        // Initialize local player's stats
-        InitializePlayerStats();
-        
         Respawn(0.0f);
-        if (lobbyCamera != null) {
-            lobbyCamera.enabled = false;
+        
+        // Initialize stats when joining room
+        InitializePlayerStats();
+
+        // Update the room player count immediately when someone joins
+        string roomName = PhotonNetwork.CurrentRoom.Name;
+        if (roomPlayerCounts.ContainsKey(roomName)) {
+            roomPlayerCounts[roomName] = PhotonNetwork.CurrentRoom.PlayerCount;
+            photonView.RPC("UpdateRoomPlayerCount", RpcTarget.All, roomName, PhotonNetwork.CurrentRoom.PlayerCount);
+        }
+
+        if (isReconnecting) {
+            Debug.Log("Successfully rejoined room after reconnection");
+            isReconnecting = false;
+            wasInRoom = false;
+            lastRoomName = null;
+            
+            // Restore player state if needed
+            RestorePlayerState();
+        }
+
+        if (PhotonNetwork.IsMasterClient)
+        {
+            // Spawn NPCs with a slight delay to ensure everything is set up
+            StartCoroutine(SpawnInitialNPCs());
         }
     }
 
@@ -394,9 +415,6 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         sightImage.SetActive(false);
         sceneCamera.enabled = true;
         StartCoroutine(RespawnCoroutine(spawnTime));
-        if (lobbyCamera != null) {
-            lobbyCamera.enabled = false;
-        }
     }
 
     /// <summary>
@@ -484,8 +502,32 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     private void UpdatePlayerStats_RPC(string playerName, int score, int kills) {
         Debug.Log($"UpdatePlayerStats_RPC received for {playerName}. Score: {score}, Kills: {kills}");
         
+        // Update local dictionary first
         if (!playerStats.ContainsKey(playerName)) {
-            playerStats[playerName] = new PlayerStats(score, kills);
+            playerStats[playerName] = new PlayerStats();
+        }
+        playerStats[playerName].Score = score;
+        playerStats[playerName].Kills = kills;
+        
+        // Update room properties if we're in a room
+        if (PhotonNetwork.InRoom) {
+            ExitGames.Client.Photon.Hashtable statsData = new ExitGames.Client.Photon.Hashtable();
+            if (PhotonNetwork.CurrentRoom.CustomProperties.ContainsKey(PLAYER_STATS_PROP_KEY)) {
+                statsData = (ExitGames.Client.Photon.Hashtable)PhotonNetwork.CurrentRoom.CustomProperties[PLAYER_STATS_PROP_KEY];
+            }
+            
+            // Create or update player stats in the room properties
+            ExitGames.Client.Photon.Hashtable playerData = new ExitGames.Client.Photon.Hashtable() {
+                {"Score", score},
+                {"Kills", kills}
+            };
+            statsData[playerName] = playerData;
+            
+            // Update the room properties
+            ExitGames.Client.Photon.Hashtable roomProps = new ExitGames.Client.Photon.Hashtable() {
+                {PLAYER_STATS_PROP_KEY, statsData}
+            };
+            PhotonNetwork.CurrentRoom.SetCustomProperties(roomProps);
         }
         
         // Update UI for the local player
@@ -608,14 +650,6 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         {
             MaintainNPCCount();
         }
-
-        // Force cursor to stay visible/unlocked if leaderboard is open
-        if (isLeaderboardOpen) {
-            if (Cursor.lockState != CursorLockMode.None || !Cursor.visible) {
-                Cursor.lockState = CursorLockMode.None;
-                Cursor.visible = true;
-            }
-        }
     }
 
     [PunRPC]
@@ -637,16 +671,30 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     void EndGame() {
         isGameActive = false;
         
-        // Disable player controls
+        // Disable all player functionality
         if (player != null) {
-            PlayerHealth playerHealth = player.GetComponent<PlayerHealth>();
-            if (playerHealth != null) {
-                playerHealth.enabled = false;
+            // Disable all interactive components
+            var components = player.GetComponents<MonoBehaviour>();
+            foreach (var component in components) {
+                if (component != this && // Don't disable NetworkManager
+                    (component.GetType().Name.Contains("Controller") ||
+                     component.GetType().Name.Contains("Shooting") ||
+                     component.GetType().Name.Contains("Weapon") ||
+                     component.GetType().Name.Contains("Gun") ||
+                     component.GetType().Name.Contains("Health") ||
+                     component.GetType().Name.Contains("Mover"))) {
+                    component.enabled = false;
+                }
             }
-            
-            PlayerNetworkMover playerMover = player.GetComponent<PlayerNetworkMover>();
-            if (playerMover != null) {
-                playerMover.enabled = false;
+
+            // Also disable components in children (weapons, etc.)
+            var childComponents = player.GetComponentsInChildren<MonoBehaviour>();
+            foreach (var component in childComponents) {
+                if (component.GetType().Name.Contains("Weapon") ||
+                    component.GetType().Name.Contains("Gun") ||
+                    component.GetType().Name.Contains("Shooting")) {
+                    component.enabled = false;
+                }
             }
         }
 
@@ -672,18 +720,32 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         Cursor.visible = true;
         Cursor.lockState = CursorLockMode.None;
 
-        // Show leaderboard with slight delay to ensure UI setup
-        StartCoroutine(ShowLeaderboardDelayed());
+        // Force a final stats sync
+        string playerName = PhotonNetwork.LocalPlayer.NickName;
+        if (playerStats.ContainsKey(playerName)) {
+            photonView.RPC("UpdatePlayerStats_RPC", RpcTarget.All, 
+                playerName, 
+                playerStats[playerName].Score, 
+                playerStats[playerName].Kills);
+        }
+        
+        // Show leaderboard after a short delay to ensure stats are synced
+        StartCoroutine(DelayedShowLeaderboard());
     }
 
-    private IEnumerator ShowLeaderboardDelayed() {
-        yield return new WaitForSeconds(0.1f); // Small delay to ensure proper setup
+    private IEnumerator DelayedShowLeaderboard() {
+        // Wait for stats to sync across network
+        yield return new WaitForSeconds(0.5f);
         ShowFinalLeaderboard();
     }
 
-    // Show the leaderboard and unlock cursor
     void ShowFinalLeaderboard() {
-        if (leaderboardContent == null || leaderboardPanel == null) return;
+        if (leaderboardContent == null || leaderboardPanel == null) {
+            Debug.LogError("Leaderboard UI components are missing!");
+            return;
+        }
+
+        Debug.Log("Starting to show leaderboard...");
 
         // Clear existing entries
         foreach (Transform child in leaderboardContent) {
@@ -692,57 +754,91 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             }
         }
 
-        // Sort players by score
-        var sortedPlayers = playerStats.OrderByDescending(p => p.Value.Score)
-                                     .ThenByDescending(p => p.Value.Kills)
-                                     .ToList();
+        // Get stats from room properties
+        var sortedPlayers = new List<KeyValuePair<string, PlayerStats>>();
+        
+        if (PhotonNetwork.CurrentRoom != null && 
+            PhotonNetwork.CurrentRoom.CustomProperties.ContainsKey(PLAYER_STATS_PROP_KEY)) {
+            ExitGames.Client.Photon.Hashtable statsData = 
+                (ExitGames.Client.Photon.Hashtable)PhotonNetwork.CurrentRoom.CustomProperties[PLAYER_STATS_PROP_KEY];
+            
+            foreach (DictionaryEntry entry in statsData) {
+                string playerName = entry.Key.ToString();
+                ExitGames.Client.Photon.Hashtable playerData = (ExitGames.Client.Photon.Hashtable)entry.Value;
+                
+                PlayerStats stats = new PlayerStats {
+                    Score = (int)playerData["Score"],
+                    Kills = (int)playerData["Kills"]
+                };
+                
+                sortedPlayers.Add(new KeyValuePair<string, PlayerStats>(playerName, stats));
+                Debug.Log($"Retrieved player stats: {playerName} - Score: {stats.Score}, Kills: {stats.Kills}");
+            }
+        }
+
+        // Sort players by score and kills
+        sortedPlayers = sortedPlayers
+            .OrderByDescending(p => p.Value.Score)
+            .ThenByDescending(p => p.Value.Kills)
+            .ToList();
 
         // Create leaderboard entries
-        for (int i = 0; i < sortedPlayers.Count; i++) {
-            var playerStat = sortedPlayers[i];
+        int maxEntries = 8;
+        for (int i = 0; i < maxEntries; i++) {
             GameObject entry = Instantiate(leaderboardEntryPrefab, leaderboardContent);
             LeaderboardEntry entryScript = entry.GetComponent<LeaderboardEntry>();
-            entryScript.SetStats(
-                playerStat.Key,
-                playerStat.Value.Score,
-                playerStat.Value.Kills,
-                i + 1
-            );
-        }
-        // Fill remaining slots with placeholder entries up to 8
-        for (int i = sortedPlayers.Count; i < 8; i++) {
-            GameObject entry = Instantiate(leaderboardEntryPrefab, leaderboardContent);
-            LeaderboardEntry entryScript = entry.GetComponent<LeaderboardEntry>();
-            entryScript.SetStats("-|-", 0, 0, i + 1);
+            
+            if (i < sortedPlayers.Count) {
+                var playerStat = sortedPlayers[i];
+                Debug.Log($"Creating leaderboard entry for {playerStat.Key}: Score={playerStat.Value.Score}, Kills={playerStat.Value.Kills}");
+                entryScript.SetStats(
+                    playerStat.Key,
+                    playerStat.Value.Score,
+                    playerStat.Value.Kills,
+                    i + 1
+                );
+            } else {
+                entryScript.SetStats("-|-", 0, 0, i + 1);
+                if (entryScript.scoreText != null) entryScript.scoreText.text = "-|-";
+                if (entryScript.killsText != null) entryScript.killsText.text = "-|-";
+            }
         }
 
+        // Make sure the leaderboard is visible
         leaderboardPanel.SetActive(true);
-        isLeaderboardOpen = true;
-        Cursor.lockState = CursorLockMode.None;
-        Cursor.visible = true;
-
-        // Disable player controls and all gun scripts
-        if (player != null) {
-            var controller = player.GetComponent<FirstPersonController>();
-            if (controller != null) controller.enabled = false;
-            foreach (var gun in player.GetComponentsInChildren<FpsGun>(true)) {
-                gun.enabled = false;
-            }
-            foreach (var gun in player.GetComponentsInChildren<TpsGun>(true)) {
-                gun.enabled = false;
-            }
-        }
-
-        // Setup back button if it exists
-        if (backButton != null) {
-            backButton.onClick.RemoveAllListeners();
-            backButton.onClick.AddListener(CloseLeaderboard);
-        }
+        Debug.Log("Leaderboard display completed");
     }
 
-    // Public method to close leaderboard and show start UI
-    public void CloseLeaderboard() {
-        FullResetGame();
+    // Remove the duplicate OnRoomPropertiesUpdate method and combine functionality into a single method
+    public override void OnRoomPropertiesUpdate(ExitGames.Client.Photon.Hashtable propertiesThatChanged) {
+        base.OnRoomPropertiesUpdate(propertiesThatChanged);
+        
+        // Handle player stats updates for leaderboard
+        if (propertiesThatChanged.ContainsKey(PLAYER_STATS_PROP_KEY) && 
+            leaderboardPanel != null && 
+            leaderboardPanel.activeSelf) {
+            ShowFinalLeaderboard();
+        }
+        
+        // Handle reconnection updates
+        if (isReconnecting && PhotonNetwork.InRoom) {
+            // Make sure we have the latest room properties after reconnecting
+            UpdateCachedRoomInfo(PhotonNetwork.CurrentRoom.Name, PhotonNetwork.CurrentRoom.CustomProperties);
+        }
+        
+        // Update room list display
+        if (PhotonNetwork.InRoom) {
+            string roomName = PhotonNetwork.CurrentRoom.Name;
+            if (cachedRoomList.ContainsKey(roomName)) {
+                // Update only the properties that changed
+                RoomInfo currentRoomInfo = cachedRoomList[roomName];
+                if (currentRoomInfo != null) {
+                    // Update the cached room info with new properties
+                    UpdateCachedRoomInfo(roomName, propertiesThatChanged);
+                    UpdateRoomListDisplay();
+                }
+            }
+        }
     }
 
     // Add method to reset game timer
@@ -806,28 +902,10 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         timerText = null;
         leaderboardPanel = null;
         leaderboardContent = null;
-    }
 
-    // Add method to handle room property updates
-    public override void OnRoomPropertiesUpdate(ExitGames.Client.Photon.Hashtable propertiesThatChanged) {
-        base.OnRoomPropertiesUpdate(propertiesThatChanged);
-        
-        if (isReconnecting && PhotonNetwork.InRoom) {
-            // Make sure we have the latest room properties after reconnecting
-            UpdateCachedRoomInfo(PhotonNetwork.CurrentRoom.Name, PhotonNetwork.CurrentRoom.CustomProperties);
-        }
-        
-        if (PhotonNetwork.InRoom) {
-            string roomName = PhotonNetwork.CurrentRoom.Name;
-            if (cachedRoomList.ContainsKey(roomName)) {
-                // Update only the properties that changed
-                RoomInfo currentRoomInfo = cachedRoomList[roomName];
-                if (currentRoomInfo != null) {
-                    // Update the cached room info with new properties
-                    UpdateCachedRoomInfo(roomName, propertiesThatChanged);
-                    UpdateRoomListDisplay();
-                }
-            }
+        if (reloadButton != null)
+        {
+            reloadButton.onClick.RemoveListener(ReloadScene);
         }
     }
 
@@ -1270,7 +1348,7 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
 
     private IEnumerator SpawnInitialNPCs()
     {
-        yield return new WaitForSeconds(2f); // Wait for players to reset
+        yield return new WaitForSeconds(1f); // Wait for room to fully initialize
         
         // Add a message that bots are joining the battle
         AddMessage("Bots are joining the battle!");
@@ -1525,173 +1603,119 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         }
     }
 
-    // Add method to sync all player stats
-    [PunRPC]
-    private void SyncAllPlayerStats(string[] playerNames, int[] scores, int[] kills) {
-        Debug.Log($"Received SyncAllPlayerStats. Players: {playerNames.Length}");
-        
-        // Clear existing stats
-        playerStats.Clear();
-        
-        // Rebuild player stats from received data
-        for (int i = 0; i < playerNames.Length; i++) {
-            playerStats[playerNames[i]] = new PlayerStats(scores[i], kills[i]);
-            Debug.Log($"Synced stats for {playerNames[i]}: Score={scores[i]}, Kills={kills[i]}");
-        }
-        
-        // Update UI for local player
-        string localPlayer = PhotonNetwork.LocalPlayer.NickName;
-        if (playerStats.ContainsKey(localPlayer)) {
-            UpdateUIStats(playerStats[localPlayer].Score, playerStats[localPlayer].Kills);
-        }
-    }
+    public void ReloadScene()
+    {
+        if (PhotonNetwork.IsMasterClient)
+        {
+            // Keep the camera active until the scene actually reloads
+            if (sceneCamera != null)
+            {
+                sceneCamera.enabled = true;
+            }
 
-    [PunRPC]
-    private void RequestStatsSync(Player requestingPlayer) {
-        if (PhotonNetwork.IsMasterClient) {
-            SyncStatsToNewPlayer(requestingPlayer);
-        }
-    }
+            // Disable player controls but keep visuals
+            if (player != null)
+            {
+                PlayerHealth playerHealth = player.GetComponent<PlayerHealth>();
+                if (playerHealth != null)
+                {
+                    playerHealth.enabled = false;
+                }
 
-    private void SyncStatsToNewPlayer(Player targetPlayer) {
-        if (!PhotonNetwork.IsMasterClient) return;
+                PlayerNetworkMover playerMover = player.GetComponent<PlayerNetworkMover>();
+                if (playerMover != null)
+                {
+                    playerMover.enabled = false;
+                }
+            }
 
-        string[] playerNames = playerStats.Keys.ToArray();
-        int[] scores = playerStats.Values.Select(ps => ps.Score).ToArray();
-        int[] kills = playerStats.Values.Select(ps => ps.Kills).ToArray();
-
-        photonView.RPC("SyncAllPlayerStats", targetPlayer, playerNames, scores, kills);
-    }
-
-    // Add method to handle back button click
-    public void OnBackButtonClicked() {
-        if (PhotonNetwork.IsMasterClient) {
-            // First, destroy all existing NPCs
+            // Clean up current game state
+            isGameActive = false;
+            ClearProcessedKills();
+            
+            // Destroy all NPCs before reloading
             GameObject[] npcs = GameObject.FindGameObjectsWithTag("NPC");
-            foreach (GameObject npc in npcs) {
-                if (npc != null) {
+            foreach (GameObject npc in npcs)
+            {
+                if (npc != null)
+                {
                     PhotonNetwork.Destroy(npc);
                 }
             }
 
-            // Clear NPC lists
-            activeNPCs.Clear();
-            deadNPCs.Clear();
-            processedKills.Clear();
-
-            // Reset game state
-            isGameActive = true;
-            currentGameTime = timeOptions[1]; // Reset to default time
-            photonView.RPC("SyncTimer", RpcTarget.All, currentGameTime);
-            
-            // Clear all player stats
-            playerStats.Clear();
-            killStreaks.Clear();
-            botKills.Clear();
-            
-            // Initialize stats for all players
-            foreach (var player in PhotonNetwork.PlayerList) {
-                playerStats[player.NickName] = new PlayerStats();
-                killStreaks[player.NickName] = 0;
-                botKills[player.NickName] = 0;
-            }
-            
-            // Sync initial stats to all clients
-            photonView.RPC("SyncAllPlayerStats", RpcTarget.All, 
-                playerStats.Keys.ToArray(),
-                playerStats.Values.Select(ps => ps.Score).ToArray(),
-                playerStats.Values.Select(ps => ps.Kills).ToArray()
-            );
-
-            // Start spawning new NPCs after a delay
-            StartCoroutine(SpawnInitialNPCs());
-        }
-        
-        // Hide leaderboard
-        if (leaderboardPanel != null) {
-            leaderboardPanel.SetActive(false);
-        }
-        
-        // Reset cursor and player controls
-        Cursor.lockState = CursorLockMode.Locked;
-        Cursor.visible = false;
-        
-        // Enable player movement
-        if (player != null) {
-            var controller = player.GetComponent<FirstPersonController>();
-            if (controller != null) controller.enabled = true;
-        }
-
-        // Reset all players to spawn points
-        photonView.RPC("ResetAllPlayers", RpcTarget.All);
-    }
-
-    [PunRPC]
-    private void ResetAllPlayers() {
-        if (player != null) {
-            // Get a random spawn point
-            int spawnIndex = Random.Range(0, spawnPoints.Length);
-            player.transform.position = spawnPoints[spawnIndex].position;
-            player.transform.rotation = spawnPoints[spawnIndex].rotation;
-
-            // Reset player health if needed
-            var health = player.GetComponent<PlayerHealth>();
-            if (health != null) {
-                health.ResetHealth();
-            }
-        }
-    }
-
-    public void FullResetGame()
-    {
-        // 1. Disconnect from Photon
-        shouldReconnectAfterReset = true;
-        if (PhotonNetwork.IsConnected)
-        {
-            PhotonNetwork.Disconnect();
+            // Start the reload process
+            StartCoroutine(SmoothReloadCoroutine());
         }
         else
         {
-            PhotonNetwork.ConnectUsingSettings();
+            Debug.Log("Only the host can restart the game!");
+            AddMessage("Only the host can restart the game!");
         }
-
-        // 2. Hide all gameplay UI and panels
-        if (leaderboardPanel != null) leaderboardPanel.SetActive(false);
-        if (messageWindow != null) messageWindow.SetActive(false);
-        if (sightImage != null) sightImage.SetActive(false);
-        if (timerText != null) timerText.gameObject.SetActive(false);
-        if (scoreText != null) scoreText.gameObject.SetActive(false);
-        if (killsText != null) killsText.gameObject.SetActive(false);
-
-        // 3. Show the main menu/start UI
-        if (serverWindow != null) serverWindow.SetActive(true);
-
-        // 4. Disable player and gameplay objects
-        if (player != null) player.SetActive(false);
-
-        // 5. Enable lobby camera
-        if (lobbyCamera != null) lobbyCamera.enabled = true;
-
-        // 6. Clear all game state data
-        playerStats.Clear();
-        killStreaks.Clear();
-        botKills.Clear();
-        processedKills.Clear();
-        activeNPCs.Clear();
-        deadNPCs.Clear();
-
-        // 7. Destroy all NPCs
-        GameObject[] npcs = GameObject.FindGameObjectsWithTag("NPC");
-        foreach (GameObject npc in npcs)
-        {
-            Destroy(npc);
-        }
-
-        // 8. Reset cursor
-        Cursor.lockState = CursorLockMode.None;
-        Cursor.visible = true;
-
-        // 9. Optionally, reset any other static/singleton data here
     }
 
+    private IEnumerator SmoothReloadCoroutine()
+    {
+        // Wait a short moment to ensure everything is disabled properly
+        yield return new WaitForSeconds(0.1f);
+
+        if (PhotonNetwork.IsConnected)
+        {
+            // Leave the room first
+            PhotonNetwork.LeaveRoom();
+            
+            // After leaving the room, disconnect from the server
+            PhotonNetwork.Disconnect();
+        }
+
+        // Load the scene
+        SceneManager.LoadScene(SceneManager.GetActiveScene().name);
+        
+        // Reset UI elements
+        if (serverWindow != null)
+        {
+            serverWindow.SetActive(true);
+        }
+        
+        if (connectionText != null)
+        {
+            connectionText.text = "Connecting to lobby...";
+        }
+
+        // Start the reconnection process
+        StartCoroutine(ReconnectAfterReload());
+    }
+
+    private IEnumerator ReconnectAfterReload()
+    {
+        yield return new WaitForSeconds(1f); // Wait a moment for the scene to load
+        
+        // Reconnect to Photon
+        if (!PhotonNetwork.IsConnected)
+        {
+            PhotonNetwork.ConnectUsingSettings();
+            
+            // Wait for connection
+            while (!PhotonNetwork.IsConnected)
+            {
+                yield return new WaitForSeconds(0.5f);
+            }
+            
+            // Join the lobby once connected
+            PhotonNetwork.JoinLobby();
+        }
+        
+        // Reset UI
+        if (serverWindow != null)
+        {
+            serverWindow.SetActive(true);
+        }
+        if (connectionText != null)
+        {
+            connectionText.text = "";
+        }
+
+        // Make sure cursor is visible and unlocked
+        Cursor.visible = true;
+        Cursor.lockState = CursorLockMode.None;
+    }
 }
