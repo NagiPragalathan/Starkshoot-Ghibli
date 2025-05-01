@@ -1605,34 +1605,35 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
 
     public void ReloadScene()
     {
+        // Keep the camera active until the scene actually reloads
+        if (sceneCamera != null)
+        {
+            sceneCamera.enabled = true;
+        }
+
+        // Disable player controls but keep visuals
+        if (player != null)
+        {
+            PlayerHealth playerHealth = player.GetComponent<PlayerHealth>();
+            if (playerHealth != null)
+            {
+                playerHealth.enabled = false;
+            }
+
+            PlayerNetworkMover playerMover = player.GetComponent<PlayerNetworkMover>();
+            if (playerMover != null)
+            {
+                playerMover.enabled = false;
+            }
+        }
+
+        // Clean up current game state
+        isGameActive = false;
+        ClearProcessedKills();
+        
+        // If host, clean up NPCs and notify others
         if (PhotonNetwork.IsMasterClient)
         {
-            // Keep the camera active until the scene actually reloads
-            if (sceneCamera != null)
-            {
-                sceneCamera.enabled = true;
-            }
-
-            // Disable player controls but keep visuals
-            if (player != null)
-            {
-                PlayerHealth playerHealth = player.GetComponent<PlayerHealth>();
-                if (playerHealth != null)
-                {
-                    playerHealth.enabled = false;
-                }
-
-                PlayerNetworkMover playerMover = player.GetComponent<PlayerNetworkMover>();
-                if (playerMover != null)
-                {
-                    playerMover.enabled = false;
-                }
-            }
-
-            // Clean up current game state
-            isGameActive = false;
-            ClearProcessedKills();
-            
             // Destroy all NPCs before reloading
             GameObject[] npcs = GameObject.FindGameObjectsWithTag("NPC");
             foreach (GameObject npc in npcs)
@@ -1642,15 +1643,18 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
                     PhotonNetwork.Destroy(npc);
                 }
             }
+            photonView.RPC("ClientLeaveGame", RpcTarget.All);
+        }
 
-            // Start the reload process
-            StartCoroutine(SmoothReloadCoroutine());
-        }
-        else
-        {
-            Debug.Log("Only the host can restart the game!");
-            AddMessage("Only the host can restart the game!");
-        }
+        // Start the reload process for everyone
+        StartCoroutine(SmoothReloadCoroutine());
+    }
+
+    [PunRPC]
+    private void ClientLeaveGame()
+    {
+        // This will be called on all clients when the host initiates reload
+        StartCoroutine(SmoothReloadCoroutine());
     }
 
     private IEnumerator SmoothReloadCoroutine()
@@ -1662,9 +1666,6 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         {
             // Leave the room first
             PhotonNetwork.LeaveRoom();
-            
-            // After leaving the room, disconnect from the server
-            PhotonNetwork.Disconnect();
         }
 
         // Load the scene
