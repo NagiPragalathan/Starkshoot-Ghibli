@@ -9,16 +9,38 @@ using System.Collections.Generic;
 public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
 {
     [Header("Movement Settings")]
-    [SerializeField] private float moveSpeed = 3.5f;
+    [SerializeField] private float moveSpeed = 5f;  // Increased base speed
     [SerializeField] private float patrolRadius = 20f;
     [SerializeField] private float minWaitTime = 1f;
     [SerializeField] private float maxWaitTime = 3f;
+    [SerializeField] private float rotationSpeed = 15f; // Faster rotation
 
     [Header("Combat Settings")]
     [SerializeField] private float detectionRange = 30f;
     [SerializeField] private float attackRange = 10f;
     [SerializeField] private float attackCooldown = 2f;
     [SerializeField] private int damageAmount = 20;
+
+    [Header("Collision Settings")]
+    [SerializeField] private float wallCheckRadius = 1f;
+    [SerializeField] private LayerMask shootableLayer;
+    [SerializeField] private float minWallDistance = 0.75f;
+    [SerializeField] private float pushForce = 2.5f;
+    [SerializeField] private float smoothingSpeed = 5f;
+    private readonly string[] wallTags = { "Metal", "Dirt", "Wood", "Glass", "Concrete", "Water", "Train" };
+    private Vector3 lastSafePosition;
+    private Vector3 targetPosition;
+    private bool isRepositioning = false;
+
+    [Header("Pathfinding Settings")]
+    [SerializeField] private float pathRecalculationTime = 0.2f;
+    [SerializeField] private float stuckCheckDistance = 0.1f;
+    [SerializeField] private float stuckCheckTime = 1.5f;
+    [SerializeField] private int maxPathRetries = 3;
+    private Vector3 lastPosition;
+    private float lastMovementTime;
+    private int pathRetryCount;
+    private bool isStuck = false;
 
     // Components
     private NavMeshAgent agent;
@@ -31,6 +53,7 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
     private bool isMoving = false;
     private bool isInitialized = false;
     private int npcViewID;
+    private Rigidbody rb;
 
     // Animation parameter hashes (faster than strings)
     private int hashHorizontal;
@@ -51,6 +74,29 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
         photonView = GetComponent<PhotonView>();
         npcHealth = GetComponent<NPCHealth>();
         npcViewID = photonView.ViewID;
+        rb = GetComponent<Rigidbody>();
+        
+        // Ensure we have a Rigidbody and Collider for collision detection
+        if (rb == null)
+        {
+            rb = gameObject.AddComponent<Rigidbody>();
+            Debug.Log($"NPC {npcViewID}: Added Rigidbody component");
+        }
+        
+        rb.isKinematic = true;
+        rb.useGravity = false;
+        rb.collisionDetectionMode = CollisionDetectionMode.Continuous;
+
+        // Ensure we have a collider
+        Collider col = GetComponent<Collider>();
+        if (col == null)
+        {
+            CapsuleCollider capsule = gameObject.AddComponent<CapsuleCollider>();
+            capsule.height = 2f;
+            capsule.radius = 0.5f;
+            capsule.center = new Vector3(0, 1f, 0);
+            Debug.Log($"NPC {npcViewID}: Added CapsuleCollider component");
+        }
         
         // Get or find animator
         animator = GetComponent<Animator>();
@@ -74,6 +120,7 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
         
         // Store starting position
         startPosition = transform.position;
+        lastSafePosition = startPosition;
 
         // Set proper scale (1.5x is larger than player)
         transform.localScale = new Vector3(1.5f, 1.5f, 1.5f);
@@ -88,6 +135,13 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
             InitializeNPC();
         }
         npcGun = GetComponentInChildren<NPCTpsGun>();
+
+        // Log initial setup
+        Debug.Log($"NPC {npcViewID} initialized with components:" +
+            $"\nRigidbody: {rb != null}" +
+            $"\nCollider: {GetComponent<Collider>() != null}" +
+            $"\nNavMeshAgent: {agent != null}" +
+            $"\nPosition: {transform.position}");
     }
 
     public void InitializeNPC()
@@ -98,9 +152,9 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
             agent.speed = moveSpeed;
             agent.stoppingDistance = 1f;
             agent.autoBraking = true;
-            agent.acceleration = 12f;
-            agent.angularSpeed = 180f;
-            agent.avoidancePriority = Random.Range(20, 80); // Different priorities to avoid stacking
+            agent.acceleration = 16f;  // Faster acceleration
+            agent.angularSpeed = 360f; // Faster turning
+            agent.avoidancePriority = Random.Range(20, 80);
             
             // Ensure agent is on the NavMesh
             NavMeshHit hit;
@@ -135,9 +189,205 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
         Debug.Log($"NPC {npcViewID} fully initialized. Is Master: {PhotonNetwork.IsMasterClient}");
     }
 
+    private void OnEnable()
+    {
+        Debug.Log($"NPC {npcViewID}: OnEnable called");
+    }
+
+    private void OnDisable()
+    {
+        Debug.Log($"NPC {npcViewID}: OnDisable called");
+    }
+
+    private void OnTriggerEnter(Collider other)
+    {
+        Debug.Log($"NPC {npcViewID} trigger enter with: {other.gameObject.name} (Tag: {other.gameObject.tag})");
+        
+        if (System.Array.Exists(wallTags, tag => other.CompareTag(tag)))
+        {
+            Debug.LogWarning($"NPC {npcViewID} triggered wall collision with: {other.gameObject.name}");
+            HandleWallCollision(other.transform.position);
+        }
+    }
+
+    private void OnCollisionEnter(Collision collision)
+    {
+        Debug.Log($"NPC {npcViewID} collision enter with: {collision.gameObject.name} (Tag: {collision.gameObject.tag})");
+        
+        if (System.Array.Exists(wallTags, tag => collision.gameObject.CompareTag(tag)))
+        {
+            Vector3 collisionPoint = collision.contacts[0].point;
+            Debug.LogWarning($"NPC {npcViewID} WALL COLLISION at point: {collisionPoint}");
+            HandleWallCollision(collisionPoint);
+        }
+    }
+
+    private void OnCollisionStay(Collision collision)
+    {
+        Debug.Log($"NPC {npcViewID} collision stay with: {collision.gameObject.name}");
+        
+        if (System.Array.Exists(wallTags, tag => collision.gameObject.CompareTag(tag)))
+        {
+            Debug.LogError($"NPC {npcViewID} STUCK IN WALL: {collision.gameObject.name} at position {transform.position}");
+            HandleWallCollision(collision.contacts[0].point);
+        }
+    }
+
+    private void HandleWallCollision(Vector3 collisionPoint)
+    {
+        if (isRepositioning) return;
+        
+        // Calculate direction away from wall
+        Vector3 awayFromWall = (transform.position - collisionPoint).normalized;
+        Vector3 safePosition = transform.position + awayFromWall * minWallDistance;
+        
+        // Verify safe position
+        NavMeshHit hit;
+        if (NavMesh.SamplePosition(safePosition, out hit, minWallDistance, NavMesh.AllAreas))
+        {
+            targetPosition = hit.position;
+            StartCoroutine(SmoothRepositioning());
+        }
+        else if (NavMesh.SamplePosition(lastSafePosition, out hit, minWallDistance, NavMesh.AllAreas))
+        {
+            targetPosition = hit.position;
+            StartCoroutine(SmoothRepositioning());
+        }
+    }
+
+    private IEnumerator SmoothRepositioning()
+    {
+        isRepositioning = true;
+        Vector3 startPosition = transform.position;
+        float journeyLength = Vector3.Distance(startPosition, targetPosition);
+        float startTime = Time.time;
+        
+        // Temporarily pause the NavMeshAgent
+        if (agent != null && agent.isOnNavMesh)
+        {
+            agent.isStopped = true;
+        }
+
+        while (Vector3.Distance(transform.position, targetPosition) > 0.01f)
+        {
+            float distanceCovered = (Time.time - startTime) * smoothingSpeed;
+            float fractionOfJourney = distanceCovered / journeyLength;
+            
+            transform.position = Vector3.Lerp(startPosition, targetPosition, fractionOfJourney);
+            
+            if (agent != null && agent.isOnNavMesh)
+            {
+                agent.Warp(transform.position);
+            }
+            
+            yield return null;
+        }
+
+        // Resume NavMeshAgent
+        if (agent != null && agent.isOnNavMesh)
+        {
+            agent.isStopped = false;
+            agent.ResetPath();
+        }
+        
+        isRepositioning = false;
+        lastSafePosition = transform.position;
+    }
+
+    private void CheckAndCorrectWallCollision()
+    {
+        if (isRepositioning) return;
+
+        Collider[] nearbyWalls = Physics.OverlapSphere(transform.position, wallCheckRadius, shootableLayer);
+        bool isNearWall = false;
+        Vector3 pushDirection = Vector3.zero;
+
+        foreach (Collider wall in nearbyWalls)
+        {
+            if (System.Array.Exists(wallTags, tag => wall.CompareTag(tag)))
+            {
+                isNearWall = true;
+                Vector3 closestPoint = wall.ClosestPoint(transform.position);
+                Vector3 awayFromWall = (transform.position - closestPoint).normalized;
+                pushDirection += awayFromWall;
+            }
+        }
+
+        if (isNearWall)
+        {
+            pushDirection.Normalize();
+            Vector3 targetPos = transform.position + pushDirection * minWallDistance;
+            
+            NavMeshHit hit;
+            if (NavMesh.SamplePosition(targetPos, out hit, minWallDistance, NavMesh.AllAreas))
+            {
+                // Use smooth movement instead of immediate repositioning
+                if (!isRepositioning)
+                {
+                    targetPosition = hit.position;
+                    StartCoroutine(SmoothRepositioning());
+                }
+            }
+        }
+        else if (!isRepositioning)
+        {
+            lastSafePosition = transform.position;
+        }
+    }
+
+    private bool IsPathBlocked()
+    {
+        if (agent == null || !agent.hasPath) return false;
+
+        Vector3 direction = (agent.steeringTarget - transform.position).normalized;
+        float checkDistance = agent.stoppingDistance + 1f;
+
+        // Check at multiple heights with reduced spacing
+        float[] heightChecks = new float[] { 0.1f, 0.5f, 1.0f };
+        foreach (float height in heightChecks)
+        {
+            RaycastHit hit;
+            if (Physics.Raycast(transform.position + Vector3.up * height, direction, out hit, checkDistance, shootableLayer))
+            {
+                if (System.Array.Exists(wallTags, tag => hit.collider.CompareTag(tag)))
+                {
+                    return true;
+                }
+            }
+        }
+
+        // Check for nearby walls with reduced radius
+        Collider[] nearbyColliders = Physics.OverlapSphere(transform.position, 1f, shootableLayer);
+        foreach (Collider col in nearbyColliders)
+        {
+            if (System.Array.Exists(wallTags, tag => col.CompareTag(tag)))
+            {
+                Vector3 closestPoint = col.ClosestPoint(transform.position);
+                if (Vector3.Distance(transform.position, closestPoint) < 0.75f)
+                {
+                    return true;
+                }
+            }
+        }
+        
+        return false;
+    }
+
     private void Update()
     {
         if (isDead) return;
+
+        // Check for wall collisions and correct position
+        if (PhotonNetwork.IsMasterClient)
+        {
+            CheckAndCorrectWallCollision();
+            
+            // Debug ray to visualize wall detection
+            Debug.DrawRay(transform.position, transform.forward * minWallDistance, Color.red);
+            Debug.DrawRay(transform.position, -transform.forward * minWallDistance, Color.red);
+            Debug.DrawRay(transform.position, transform.right * minWallDistance, Color.red);
+            Debug.DrawRay(transform.position, -transform.right * minWallDistance, Color.red);
+        }
 
         // Master client controls the NPC movement and behavior
         if (PhotonNetwork.IsMasterClient)
@@ -172,33 +422,81 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
         }
     }
 
+    private bool IsValidDestination(Vector3 targetPosition)
+    {
+        // First check if position is on NavMesh
+        NavMeshHit hit;
+        if (!NavMesh.SamplePosition(targetPosition, out hit, 1.0f, NavMesh.AllAreas))
+        {
+            Debug.Log($"NPC {npcViewID} invalid destination - not on NavMesh: {targetPosition}");
+            return false;
+        }
+
+        // Check for walls in all directions
+        for (float angle = 0; angle < 360; angle += 45)
+        {
+            Vector3 direction = Quaternion.Euler(0, angle, 0) * Vector3.forward;
+            RaycastHit wallHit;
+            if (Physics.Raycast(targetPosition + Vector3.up, direction, out wallHit, minWallDistance, shootableLayer))
+            {
+                if (System.Array.Exists(wallTags, tag => wallHit.collider.CompareTag(tag)))
+                {
+                    Debug.Log($"NPC {npcViewID} invalid destination - wall detected at angle {angle}: {wallHit.collider.name}");
+                    return false;
+                }
+            }
+        }
+
+        // Check the path to target
+        Vector3 directionToTarget = (targetPosition - transform.position).normalized;
+        float distanceToTarget = Vector3.Distance(transform.position, targetPosition);
+        
+        RaycastHit pathHit;
+        if (Physics.Raycast(transform.position + Vector3.up, directionToTarget, out pathHit, distanceToTarget, shootableLayer))
+        {
+            if (System.Array.Exists(wallTags, tag => pathHit.collider.CompareTag(tag)))
+            {
+                Debug.Log($"NPC {npcViewID} invalid path - wall blocking: {pathHit.collider.name}");
+                return false;
+            }
+        }
+
+        Debug.Log($"NPC {npcViewID} valid destination found: {targetPosition}");
+        return true;
+    }
+
     private IEnumerator AIRoutine()
     {
         Debug.Log($"NPC {npcViewID} started AI routine");
         
-        // Small initial delay to ensure everything is set up
         yield return new WaitForSeconds(Random.Range(0.1f, 0.5f));
         
         while (!isDead)
         {
             if (agent != null && agent.isOnNavMesh && !isMoving)
             {
-                // Generate random position within patrol radius
                 Vector3 randomPos = startPosition + Random.insideUnitSphere * patrolRadius;
+                randomPos.y = transform.position.y;
+
                 NavMeshHit hit;
                 if (NavMesh.SamplePosition(randomPos, out hit, patrolRadius, NavMesh.AllAreas))
                 {
-                    // Set destination and mark as moving
+                    agent.speed = moveSpeed;
                     agent.SetDestination(hit.position);
                     isMoving = true;
-                    Debug.Log($"NPC {npcViewID} moving to: {hit.position}");
                     
-                    // Wait until we reach the destination or get close enough
                     float timeout = 0;
                     while (agent.pathPending || 
                           (agent.hasPath && agent.remainingDistance > agent.stoppingDistance) && 
                           timeout < 10f)
                     {
+                        if (IsPathBlocked())
+                        {
+                            agent.ResetPath();
+                            isMoving = false;
+                            break;
+                        }
+                        
                         timeout += 0.1f;
                         yield return new WaitForSeconds(0.1f);
                     }
@@ -207,12 +505,10 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
                 }
             }
 
-            // Random wait time between movements
-            float waitTime = Random.Range(minWaitTime, maxWaitTime);
-            yield return new WaitForSeconds(waitTime);
+            yield return new WaitForSeconds(Random.Range(minWaitTime, maxWaitTime));
         }
     }
-    
+
     private IEnumerator FindPlayerRoutine()
     {
         while (!isDead)
@@ -222,94 +518,142 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
         }
     }
 
+    private bool CanSeeTarget(Vector3 targetPosition)
+    {
+        Vector3 directionToTarget = (targetPosition - transform.position).normalized;
+        float distanceToTarget = Vector3.Distance(transform.position, targetPosition);
+        
+        // Check line of sight from NPC's position
+        RaycastHit hit;
+        if (Physics.Raycast(transform.position + Vector3.up * 1.5f, directionToTarget, out hit, distanceToTarget))
+        {
+            if (System.Array.Exists(wallTags, tag => hit.collider.CompareTag(tag)))
+            {
+                return false; // Wall is blocking the view
+            }
+        }
+        
+        // Also check from gun position if available
+        if (npcGun != null)
+        {
+            Vector3 gunPosition = npcGun.transform.position;
+            directionToTarget = (targetPosition - gunPosition).normalized;
+            distanceToTarget = Vector3.Distance(gunPosition, targetPosition);
+            
+            if (Physics.Raycast(gunPosition, directionToTarget, out hit, distanceToTarget))
+            {
+                if (System.Array.Exists(wallTags, tag => hit.collider.CompareTag(tag)))
+                {
+                    return false; // Wall is blocking the gun's view
+                }
+            }
+        }
+        
+        return true;
+    }
+
     private void FindAndAttackPlayer()
     {
-        if (Time.time < nextAttackTime) return;
+        if (Time.time < nextAttackTime || isStuck) return;
 
         Collider[] colliders = Physics.OverlapSphere(transform.position, detectionRange);
-        bool foundPlayer = false;
+        Transform nearestPlayer = null;
+        float nearestDistance = float.MaxValue;
+        NavMeshPath bestPath = null;
         
         foreach (Collider col in colliders)
         {
             if (col.CompareTag("Player"))
             {
-                // Check if player is dead first
                 PlayerHealth playerHealth = col.GetComponent<PlayerHealth>();
                 if (playerHealth != null && playerHealth.IsDead())
                 {
-                    // Skip dead players
                     continue;
                 }
 
-                foundPlayer = true;
                 float distance = Vector3.Distance(transform.position, col.transform.position);
-                
-                // If player is within attack range
-                if (distance <= attackRange)
+                if (distance < nearestDistance)
                 {
-                    // Stop the NPC while shooting
-                    if (agent != null)
+                    NavMeshPath path = new NavMeshPath();
+                    if (NavMesh.CalculatePath(transform.position, col.transform.position, NavMesh.AllAreas, path))
                     {
-                        agent.isStopped = true;
-                        isMoving = false;
-                    }
-
-                    // Face the player
-                    Vector3 directionToPlayer = (col.transform.position - transform.position).normalized;
-                    transform.rotation = Quaternion.LookRotation(directionToPlayer);
-
-                    if (npcGun != null)
-                    {
-                        npcGun.UpdateAiming(col.transform.position);
-                        // Only shoot if we're properly aimed AND player is alive
-                        if (IsAimedAtTarget(col.transform.position) && !playerHealth.IsDead())
+                        if (path.status == NavMeshPathStatus.PathComplete)
                         {
-                            Attack(col.gameObject);
-                            npcGun.Shoot();
-                            nextAttackTime = Time.time + attackCooldown;
+                            // Calculate actual path length
+                            float pathLength = CalculatePathLength(path);
+                            if (pathLength < nearestDistance * 1.5f) // Allow slightly longer paths if they're valid
+                            {
+                                nearestDistance = distance;
+                                nearestPlayer = col.transform;
+                                bestPath = path;
+                            }
                         }
-                    }
-                    break;
-                }
-                // If player is detected but not in attack range, move towards them
-                else if (distance <= detectionRange)
-                {
-                    if (agent != null)
-                    {
-                        agent.isStopped = false;
-                        agent.SetDestination(col.transform.position);
-                        isMoving = true;
-                    }
-                    if (npcGun != null)
-                    {
-                        npcGun.UpdateAiming(col.transform.position);
                     }
                 }
             }
         }
-        
-        if (!foundPlayer)
+
+        if (nearestPlayer != null && bestPath != null)
         {
-            if (agent != null)
+            Vector3 directionToPlayer = (nearestPlayer.position - transform.position).normalized;
+            
+            if (nearestDistance <= attackRange && CanSeeTarget(nearestPlayer.position))
             {
-                agent.isStopped = false;
+                // Handle attack logic...
+                if (agent != null)
+                {
+                    agent.isStopped = true;
+                    isMoving = false;
+                }
+
+                transform.rotation = Quaternion.Lerp(transform.rotation, 
+                    Quaternion.LookRotation(directionToPlayer), 
+                    Time.deltaTime * rotationSpeed);
+
+                if (npcGun != null)
+                {
+                    npcGun.UpdateAiming(nearestPlayer.position);
+                    if (IsAimedAtTarget(nearestPlayer.position) && CanSeeTarget(nearestPlayer.position))
+                    {
+                        Attack(nearestPlayer.gameObject);
+                        npcGun.Shoot();
+                        nextAttackTime = Time.time + attackCooldown;
+                    }
+                }
             }
-            if (npcGun != null)
+            else if (nearestDistance <= detectionRange)
             {
-                npcGun.ResetAiming();
+                // Use the pre-calculated path
+                if (agent != null && !isRepositioning)
+                {
+                    agent.isStopped = false;
+                    agent.speed = moveSpeed * 1.5f;
+                    agent.SetPath(bestPath);
+                    isMoving = true;
+                    CheckIfStuck();
+                }
+                if (npcGun != null)
+                {
+                    npcGun.UpdateAiming(nearestPlayer.position);
+                }
             }
-            if (isMoving && !agent.hasPath)
-            {
-                isMoving = false;
-            }
+        }
+        else
+        {
+            ResetChaseState();
         }
     }
 
     private bool IsAimedAtTarget(Vector3 targetPosition)
     {
+        if (!CanSeeTarget(targetPosition))
+        {
+            return false;
+        }
+
         Vector3 directionToTarget = (targetPosition - transform.position).normalized;
         float angle = Vector3.Angle(transform.forward, directionToTarget);
-        return angle < 30f; // Adjust this value to control aim accuracy
+        return angle < 30f;
     }
 
     private bool IsPlayerAlive(GameObject player)
@@ -482,5 +826,209 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
         
         // Play death animation
         photonView.RPC("PlayDeathAnimation", RpcTarget.All);
+    }
+
+    private void CheckIfStuck()
+    {
+        if (Vector3.Distance(transform.position, lastPosition) < stuckCheckDistance)
+        {
+            if (Time.time - lastMovementTime > stuckCheckTime)
+            {
+                if (!isStuck)
+                {
+                    isStuck = true;
+                    StartCoroutine(HandleStuckState());
+                }
+            }
+        }
+        else
+        {
+            lastPosition = transform.position;
+            lastMovementTime = Time.time;
+            isStuck = false;
+            pathRetryCount = 0;
+        }
+    }
+
+    private IEnumerator HandleStuckState()
+    {
+        if (pathRetryCount >= maxPathRetries)
+        {
+            // Try to find any valid path to the target area
+            if (currentTarget != null)
+            {
+                Vector3[] checkPoints = GenerateCheckPointsAroundTarget(currentTarget.position);
+                foreach (Vector3 point in checkPoints)
+                {
+                    NavMeshPath alternatePath = new NavMeshPath();
+                    if (NavMesh.CalculatePath(transform.position, point, NavMesh.AllAreas, alternatePath))
+                    {
+                        if (alternatePath.status == NavMeshPathStatus.PathComplete)
+                        {
+                            if (agent != null)
+                            {
+                                agent.SetPath(alternatePath);
+                                pathRetryCount = 0;
+                                isStuck = false;
+                                yield break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // If still no path found, retreat
+            if (agent != null)
+            {
+                agent.isStopped = true;
+                agent.ResetPath();
+                targetPosition = lastSafePosition;
+                StartCoroutine(SmoothRepositioning());
+            }
+            yield return new WaitForSeconds(1f);
+            pathRetryCount = 0;
+            isStuck = false;
+            yield break;
+        }
+
+        // Try to find alternative paths with more varied positions
+        for (int i = 0; i < 8; i++)
+        {
+            Vector3 randomOffset = Quaternion.Euler(0, i * 45f, 0) * Vector3.forward * Random.Range(3f, 7f);
+            Vector3 alternativeTarget = transform.position + randomOffset;
+
+            NavMeshHit hit;
+            if (NavMesh.SamplePosition(alternativeTarget, out hit, 5f, NavMesh.AllAreas))
+            {
+                if (agent != null && IsValidPath(hit.position))
+                {
+                    agent.SetDestination(hit.position);
+                    pathRetryCount++;
+                    break;
+                }
+            }
+        }
+
+        yield return new WaitForSeconds(pathRecalculationTime);
+        isStuck = false;
+    }
+
+    private Vector3[] GenerateCheckPointsAroundTarget(Vector3 targetPos)
+    {
+        List<Vector3> points = new List<Vector3>();
+        float[] distances = { 2f, 4f, 6f };
+        int angleStep = 45;
+
+        foreach (float dist in distances)
+        {
+            for (int angle = 0; angle < 360; angle += angleStep)
+            {
+                Vector3 offset = Quaternion.Euler(0, angle, 0) * Vector3.forward * dist;
+                points.Add(targetPos + offset);
+            }
+        }
+
+        return points.ToArray();
+    }
+
+    private bool IsValidPath(Vector3 destination)
+    {
+        NavMeshPath path = new NavMeshPath();
+        if (!NavMesh.CalculatePath(transform.position, destination, NavMesh.AllAreas, path))
+        {
+            return false;
+        }
+
+        if (path.status != NavMeshPathStatus.PathComplete)
+        {
+            return false;
+        }
+
+        // Check each path segment with smaller intervals
+        Vector3 previousPoint = path.corners[0];
+        for (int i = 1; i < path.corners.Length; i++)
+        {
+            Vector3 currentPoint = path.corners[i];
+            float segmentLength = Vector3.Distance(previousPoint, currentPoint);
+            Vector3 direction = (currentPoint - previousPoint).normalized;
+            
+            // Check multiple points along the path segment
+            for (float dist = 0; dist < segmentLength; dist += 0.5f)
+            {
+                Vector3 checkPoint = previousPoint + direction * dist;
+                // Check a bit above ground level to avoid floor collisions
+                Vector3 checkPosition = checkPoint + Vector3.up * 0.5f;
+                
+                // Use smaller radius for checking walls
+                Collider[] nearbyColliders = Physics.OverlapSphere(checkPosition, 0.4f, shootableLayer);
+                foreach (Collider col in nearbyColliders)
+                {
+                    if (System.Array.Exists(wallTags, tag => col.CompareTag(tag)))
+                    {
+                        // Don't immediately reject - check if there's enough space to pass
+                        if (!HasSpaceToCross(checkPosition))
+                        {
+                            return false;
+                        }
+                    }
+                }
+            }
+            previousPoint = currentPoint;
+        }
+
+        return true;
+    }
+
+    private bool HasSpaceToCross(Vector3 position)
+    {
+        // Check in multiple directions for a passage
+        Vector3[] directions = {
+            Vector3.forward, Vector3.back, Vector3.left, Vector3.right,
+            (Vector3.forward + Vector3.right).normalized,
+            (Vector3.forward + Vector3.left).normalized,
+            (Vector3.back + Vector3.right).normalized,
+            (Vector3.back + Vector3.left).normalized
+        };
+
+        foreach (Vector3 dir in directions)
+        {
+            // Check if there's enough space to pass through
+            if (!Physics.SphereCast(position, 0.3f, dir, out RaycastHit hit, 1f, shootableLayer))
+            {
+                return true; // Found a clear path
+            }
+        }
+        return false;
+    }
+
+    private float CalculatePathLength(NavMeshPath path)
+    {
+        float length = 0;
+        if (path.corners.Length < 2) return 0;
+        
+        for (int i = 1; i < path.corners.Length; i++)
+        {
+            length += Vector3.Distance(path.corners[i - 1], path.corners[i]);
+        }
+        return length;
+    }
+
+    private void ResetChaseState()
+    {
+        if (agent != null)
+        {
+            agent.isStopped = false;
+            agent.speed = moveSpeed;
+        }
+        if (npcGun != null)
+        {
+            npcGun.ResetAiming();
+        }
+        if (isMoving && !agent.hasPath)
+        {
+            isMoving = false;
+        }
+        isStuck = false;
+        pathRetryCount = 0;
     }
 }
