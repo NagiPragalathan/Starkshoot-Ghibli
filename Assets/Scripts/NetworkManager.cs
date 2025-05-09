@@ -106,6 +106,23 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     // Add this at the start of the class, after other private fields
     private const string PLAYER_STATS_PROP_KEY = "PlayerStats";
 
+    // Add these fields at the top of the NetworkManager class
+    private const int MAX_ROOM_CAPACITY = 8;
+    private Dictionary<string, int> roomNPCCounts = new Dictionary<string, int>();
+
+    // Add these fields at the top of the NetworkManager class
+    private bool isAttemptingReconnect = false;
+    private ExitGames.Client.Photon.Hashtable cachedPlayerData;
+    private float reconnectTimeoutDuration = 30f; // 30 seconds timeout for reconnection
+    private float lastReconnectAttemptTime = 0f;
+
+    // Add these fields at the top of the NetworkManager class
+    private bool isReconnectionInProgress = false;
+    private float reconnectionTimeout = 30f; // 30 seconds timeout
+    private int maxReconnectionAttempts = 5;
+    private float reconnectionDelay = 2f;
+    private Dictionary<string, object> cachedGameState;
+
     /// <summary>
     /// Start is called on the frame when a script is enabled just before
     /// any of the Update methods is called the first time.
@@ -215,30 +232,309 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     /// Called on the client when the connection was lost or you disconnected from the server.
     /// </summary>
     /// <param name="cause">DisconnectCause data associated with this disconnect.</param>
-    public override void OnDisconnected(DisconnectCause cause) {
+    public override void OnDisconnected(DisconnectCause cause)
+    {
         Debug.LogWarning($"Disconnected from server: {cause}");
         
-        // Store room information before disconnect
-        if (PhotonNetwork.InRoom) {
-            lastRoomName = PhotonNetwork.CurrentRoom.Name;
-            wasInRoom = true;
+        // Don't attempt reconnection for intentional disconnects
+        if (cause == DisconnectCause.DisconnectByClientLogic)
+        {
+            ResetGameState();
+            return;
         }
 
-        // Don't try to reconnect if it was an intended disconnect
-        if (cause != DisconnectCause.DisconnectByClientLogic) {
-            StartCoroutine(TryReconnect());
+        // Start reconnection process
+        StartCoroutine(HandleReconnection());
+    }
+
+    private void CacheGameState()
+    {
+        if (cachedGameState == null)
+        {
+            cachedGameState = new Dictionary<string, object>();
         }
 
-        if (connectionText != null) {
-            connectionText.text = $"Disconnected: {cause}. Attempting to reconnect...";
+        // Cache player stats
+        cachedGameState["PlayerStats"] = new Dictionary<string, PlayerStats>(playerStats);
+        cachedGameState["KillStreaks"] = new Dictionary<string, int>(killStreaks);
+        cachedGameState["BotKills"] = new Dictionary<string, int>(botKills);
+        
+        // Cache room information if in a room
+        if (PhotonNetwork.InRoom)
+        {
+            cachedGameState["RoomName"] = PhotonNetwork.CurrentRoom.Name;
+            cachedGameState["GameTime"] = currentGameTime;
+            cachedGameState["IsGameActive"] = isGameActive;
+            cachedGameState["MaxNPCs"] = maxNPCs;
+            
+            // Cache room properties - Fix type conversion issue
+            if (PhotonNetwork.CurrentRoom.CustomProperties != null)
+            {
+                // Create a copy instead of casting the Hashtable directly
+                ExitGames.Client.Photon.Hashtable propsCopy = new ExitGames.Client.Photon.Hashtable();
+                foreach (var prop in PhotonNetwork.CurrentRoom.CustomProperties)
+                {
+                    propsCopy.Add(prop.Key, prop.Value);
+                }
+                cachedGameState["RoomProperties"] = propsCopy;
+            }
         }
 
-        // Don't reset the game state immediately
-        if (cause == DisconnectCause.DisconnectByClientLogic) {
-            // Reset game state only if it's an intended disconnect
-            isGameActive = false;
-            Cursor.lockState = CursorLockMode.None;
+        Debug.Log("Game state cached successfully");
+    }
+
+    private IEnumerator HandleReconnection()
+    {
+        if (isReconnectionInProgress)
+        {
+            Debug.Log("Reconnection already in progress");
+            yield break;
+        }
+
+        isReconnectionInProgress = true;
+        CacheGameState();
+
+        int attemptCount = 0;
+        float startTime = Time.time;
+
+        while (attemptCount < maxReconnectionAttempts && 
+               Time.time - startTime < reconnectionTimeout && 
+               !PhotonNetwork.IsConnected)
+        {
+            Debug.Log($"Reconnection attempt {attemptCount + 1}/{maxReconnectionAttempts}");
+            
+            if (connectionText != null)
+            {
+                connectionText.text = $"Reconnecting... Attempt {attemptCount + 1}/{maxReconnectionAttempts}";
+            }
+
+            bool connectionStarted = false;
+            
+            try
+            {
+                PhotonNetwork.ConnectUsingSettings();
+                connectionStarted = true;
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogError($"Reconnection attempt failed: {e.Message}");
+            }
+
+            if (connectionStarted)
+            {
+                // Wait for connection outside try-catch
+                float waitTime = 0;
+                while (waitTime < reconnectionDelay)
+                {
+                    if (PhotonNetwork.IsConnected)
+                    {
+                        // Start game state restoration
+                        StartCoroutine(RestoreGameState());
+                        isReconnectionInProgress = false;
+                        yield break;
+                    }
+                    waitTime += 0.1f;
+                    yield return new WaitForSeconds(0.1f);
+                }
+            }
+
+            attemptCount++;
+            yield return new WaitForSeconds(reconnectionDelay);
+        }
+
+        // If we get here, reconnection failed
+        HandleReconnectionFailure();
+        isReconnectionInProgress = false;
+    }
+
+    private IEnumerator RestoreGameState()
+    {
+        if (cachedGameState == null)
+        {
+            Debug.LogWarning("No cached game state to restore");
+            yield break;
+        }
+
+        Debug.Log("Restoring game state...");
+
+        // Wait for connection to be ready
+        while (!PhotonNetwork.IsConnectedAndReady)
+        {
+            yield return new WaitForSeconds(0.1f);
+        }
+
+        bool roomJoinAttempted = false;
+        bool roomJoinSuccessful = false;
+
+        try
+        {
+            if (cachedGameState.ContainsKey("RoomName"))
+            {
+                string roomName = (string)cachedGameState["RoomName"];
+                
+                // Try to rejoin the room
+                try
+                {
+                    roomJoinAttempted = true;
+                    roomJoinSuccessful = PhotonNetwork.RejoinRoom(roomName);
+                }
+                catch (System.Exception e)
+                {
+                    Debug.LogError($"Failed to rejoin room: {e.Message}");
+                }
+
+                if (!roomJoinSuccessful && roomJoinAttempted)
+                {
+                    // If rejoin fails, try to join as new player
+                    RoomOptions options = new RoomOptions
+                    {
+                        MaxPlayers = MAX_ROOM_CAPACITY
+                    };
+                    
+                    if (cachedGameState.ContainsKey("RoomProperties"))
+                    {
+                        options.CustomRoomProperties = 
+                            cachedGameState["RoomProperties"] as ExitGames.Client.Photon.Hashtable;
+                    }
+                    
+                    PhotonNetwork.JoinOrCreateRoom(roomName, options, TypedLobby.Default);
+                }
+            }
+            else
+            {
+                PhotonNetwork.JoinLobby();
+            }
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogError($"Error during room join: {e.Message}");
+            HandleReconnectionFailure();
+            yield break;
+        }
+
+        // Wait for room join outside try-catch
+        if (roomJoinAttempted)
+        {
+            float joinTimeout = 0f;
+            while (!PhotonNetwork.InRoom && joinTimeout < 10f)
+            {
+                joinTimeout += 0.1f;
+                yield return new WaitForSeconds(0.1f);
+            }
+
+            if (!PhotonNetwork.InRoom)
+            {
+                Debug.LogError("Failed to join room within timeout period");
+                HandleReconnectionFailure();
+                yield break;
+            }
+        }
+
+        try
+        {
+            // Restore game state
+            RestoreGameData();
+            
+            // If master client, restore NPCs
+            if (PhotonNetwork.IsMasterClient)
+            {
+                StartCoroutine(RestoreNPCs());
+            }
+
+            Debug.Log("Game state restored successfully");
+            
+            if (connectionText != null)
+            {
+                connectionText.text = "Reconnected successfully!";
+                StartCoroutine(ClearConnectionText());
+            }
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogError($"Error restoring game state: {e.Message}");
+            HandleReconnectionFailure();
+        }
+    }
+
+    // Add this helper method to handle game data restoration
+    private void RestoreGameData()
+    {
+        if (cachedGameState.ContainsKey("PlayerStats"))
+        {
+            playerStats = new Dictionary<string, PlayerStats>(
+                (Dictionary<string, PlayerStats>)cachedGameState["PlayerStats"]);
+        }
+        
+        if (cachedGameState.ContainsKey("KillStreaks"))
+        {
+            killStreaks = new Dictionary<string, int>(
+                (Dictionary<string, int>)cachedGameState["KillStreaks"]);
+        }
+        
+        if (cachedGameState.ContainsKey("BotKills"))
+        {
+            botKills = new Dictionary<string, int>(
+                (Dictionary<string, int>)cachedGameState["BotKills"]);
+        }
+
+        // Restore game time and state
+        currentGameTime = (float)cachedGameState["GameTime"];
+        isGameActive = (bool)cachedGameState["IsGameActive"];
+        maxNPCs = (int)cachedGameState["MaxNPCs"];
+
+        // Update UI
+        if (PhotonNetwork.LocalPlayer != null && 
+            playerStats.ContainsKey(PhotonNetwork.LocalPlayer.NickName))
+        {
+            UpdateUIStats(
+                playerStats[PhotonNetwork.LocalPlayer.NickName].Score,
+                playerStats[PhotonNetwork.LocalPlayer.NickName].Kills
+            );
+        }
+    }
+
+    private void HandleReconnectionFailure()
+    {
+        Debug.LogError("Reconnection failed after maximum attempts");
+        
+        if (connectionText != null)
+        {
+            connectionText.text = "Failed to reconnect. Please restart the game.";
+        }
+
+        // Reset game state
+        ResetGameState();
+        
+        // Show server window
+        if (serverWindow != null)
+        {
+            serverWindow.SetActive(true);
+        }
+
+        // Reset cursor
             Cursor.visible = true;
+        Cursor.lockState = CursorLockMode.None;
+    }
+
+    private IEnumerator RestoreNPCs()
+    {
+        yield return new WaitForSeconds(1f); // Wait for room to stabilize
+        
+        // Clear existing NPCs
+        GameObject[] existingNPCs = GameObject.FindGameObjectsWithTag("NPC");
+        foreach (GameObject npc in existingNPCs)
+        {
+            if (PhotonNetwork.IsMasterClient)
+            {
+                PhotonNetwork.Destroy(npc);
+            }
+        }
+
+        // Spawn new NPCs
+        for (int i = 0; i < maxNPCs; i++)
+        {
+            SpawnNPC();
+            yield return new WaitForSeconds(0.5f);
         }
     }
 
@@ -288,14 +584,20 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             RoomInfo room = kvp.Value;
             if (room == null) continue;
 
-            // Get the current player count from our tracking dictionary
             int currentPlayerCount = roomPlayerCounts.ContainsKey(room.Name) ? 
                 roomPlayerCounts[room.Name] : room.PlayerCount;
+            
+            int npcCount = 0;
+            if (room.CustomProperties.ContainsKey("NPCCount")) {
+                npcCount = (int)room.CustomProperties["NPCCount"];
+            }
 
             string roomStatus = GetRoomStatusText(room, currentPlayerCount);
             
             roomList.text += $"Room: {room.Name}\n" +
-                            $"Players: {currentPlayerCount}/{room.MaxPlayers}\n" +
+                            $"Players: {currentPlayerCount}/{MAX_ROOM_CAPACITY}\n" +
+                            $"NPCs: {npcCount}\n" +
+                            $"Total: {currentPlayerCount + npcCount}/{MAX_ROOM_CAPACITY}\n" +
                             $"Status: {roomStatus}\n" +
                             GetRoomCustomPropertiesText(room) +
                             "-------------------\n";
@@ -304,13 +606,21 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
 
     private string GetRoomStatusText(RoomInfo room, int currentPlayerCount) {
         if (!room.IsOpen) return "Closed";
-        if (currentPlayerCount >= room.MaxPlayers) return "Full";
+        
+        int npcCount = 0;
+        if (room.CustomProperties.ContainsKey("NPCCount")) {
+            npcCount = (int)room.CustomProperties["NPCCount"];
+        }
+        
+        int totalCount = currentPlayerCount + npcCount;
+        
+        if (currentPlayerCount >= MAX_ROOM_CAPACITY) return "Full";
         if (room.CustomProperties.ContainsKey("GameState")) {
             string gameState = (string)room.CustomProperties["GameState"];
             if (gameState == "InProgress") return "Game in Progress";
             if (gameState == "Ending") return "Game Ending";
         }
-        return "Waiting for Players";
+        return $"Waiting ({totalCount}/{MAX_ROOM_CAPACITY})";
     }
 
     private string GetRoomCustomPropertiesText(RoomInfo room) {
@@ -325,9 +635,7 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         return properties;
     }
 
-    /// <summary>
-    /// The button click callback function for join room.
-    /// </summary>
+    // Modify the JoinRoom method to include NPC count in room properties
     public void JoinRoom() {
         serverWindow.SetActive(false);
         connectionText.text = "Joining room...";
@@ -337,7 +645,7 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         RoomOptions roomOptions = new RoomOptions() {
             IsVisible = true,
             IsOpen = true,
-            MaxPlayers = 8,
+            MaxPlayers = MAX_ROOM_CAPACITY,
             PublishUserId = true,
             EmptyRoomTtl = 0,
             PlayerTtl = 0,
@@ -345,9 +653,13 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             CustomRoomProperties = new ExitGames.Client.Photon.Hashtable() {
                 {"GameTime", timeOptions[timeSelectionDropdown.value]},
                 {"CreatedAt", DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss")},
-                {"GameState", "Waiting"}
+                {"GameState", "Waiting"},
+                {"NPCCount", 0}, // Add NPC count to room properties
+                {"TotalPlayers", 0} // Add total players count
             },
-            CustomRoomPropertiesForLobby = new string[] { "GameTime", "CreatedAt", "GameState" }
+            CustomRoomPropertiesForLobby = new string[] { 
+                "GameTime", "CreatedAt", "GameState", "NPCCount", "TotalPlayers" 
+            }
         };
 
         if (PhotonNetwork.IsConnectedAndReady) {
@@ -357,9 +669,12 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         }
     }
 
-    /// <summary>
-    /// Callback function on joined room.
-    /// </summary>
+    // Add method to calculate required NPC count
+    private int CalculateRequiredNPCCount(int playerCount) {
+        return Mathf.Min(MAX_ROOM_CAPACITY - playerCount, 8 - playerCount);
+    }
+
+    // Modify OnJoinedRoom to handle NPC spawning based on player count
     public override void OnJoinedRoom() {
         Debug.Log($"Joined room: {PhotonNetwork.CurrentRoom.Name}");
         connectionText.text = "";
@@ -402,9 +717,25 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
 
         if (PhotonNetwork.IsMasterClient)
         {
-            // Spawn NPCs with a slight delay to ensure everything is set up
+            UpdateRoomNPCCount();
             StartCoroutine(SpawnInitialNPCs());
         }
+    }
+
+    // Add method to update room NPC count
+    private void UpdateRoomNPCCount() {
+        if (!PhotonNetwork.IsMasterClient) return;
+
+        int playerCount = PhotonNetwork.CurrentRoom.PlayerCount;
+        int requiredNPCs = CalculateRequiredNPCCount(playerCount);
+        maxNPCs = requiredNPCs;
+
+        // Update room properties
+        ExitGames.Client.Photon.Hashtable properties = new ExitGames.Client.Photon.Hashtable() {
+            {"NPCCount", requiredNPCs},
+            {"TotalPlayers", playerCount + requiredNPCs}
+        };
+        PhotonNetwork.CurrentRoom.SetCustomProperties(properties);
     }
 
     /// <summary>
@@ -477,6 +808,11 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         if (roomPlayerCounts.ContainsKey(roomName)) {
             roomPlayerCounts[roomName] = PhotonNetwork.CurrentRoom.PlayerCount;
             photonView.RPC("UpdateRoomPlayerCount", RpcTarget.All, roomName, PhotonNetwork.CurrentRoom.PlayerCount);
+        }
+
+        if (PhotonNetwork.IsMasterClient) {
+            UpdateRoomNPCCount();
+            StartCoroutine(AdjustNPCCount());
         }
     }
 
@@ -652,8 +988,11 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         }
     }
 
+    // Modify timer synchronization
     [PunRPC]
     void SyncTimer(float time) {
+        if (!isGameActive) return;
+        
         currentGameTime = time;
         if (timerText != null) {
             timerText.text = FormatTime(currentGameTime);
@@ -913,11 +1252,16 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     private void UpdateCachedRoomInfo(string roomName, ExitGames.Client.Photon.Hashtable properties) {
         if (cachedRoomList.TryGetValue(roomName, out RoomInfo roomInfo)) {
             // Update only the properties that changed
-            foreach (DictionaryEntry entry in properties) {
-                if (roomInfo.CustomProperties.ContainsKey(entry.Key)) {
-                    roomInfo.CustomProperties[entry.Key] = entry.Value;
-                } else {
-                    roomInfo.CustomProperties.Add(entry.Key, entry.Value);
+            foreach (DictionaryEntry entry in properties)
+            {
+                string key = entry.Key.ToString();
+                if (roomInfo.CustomProperties.ContainsKey(key))
+                {
+                    roomInfo.CustomProperties[key] = entry.Value;
+                }
+                else
+                {
+                    roomInfo.CustomProperties.Add(key, entry.Value);
                 }
             }
         }
@@ -1037,31 +1381,6 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         }
     }
 
-    // Add this method to handle reconnection attempts
-    private IEnumerator TryReconnect() {
-        isReconnecting = true;
-        currentReconnectAttempts = 0;
-
-        while (!PhotonNetwork.IsConnected && currentReconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-            Debug.Log($"Attempting to reconnect... Attempt {currentReconnectAttempts + 1}/{MAX_RECONNECT_ATTEMPTS}");
-            connectionText.text = $"Reconnecting... Attempt {currentReconnectAttempts + 1}";
-
-            // Try to reconnect
-            PhotonNetwork.ConnectUsingSettings();
-            currentReconnectAttempts++;
-
-            // Wait for the reconnection interval
-            yield return new WaitForSeconds(RECONNECT_INTERVAL);
-        }
-
-        if (!PhotonNetwork.IsConnected) {
-            Debug.LogError("Failed to reconnect after maximum attempts");
-            connectionText.text = "Failed to reconnect. Please restart the game.";
-        }
-
-        isReconnecting = false;
-    }
-
     // Add method to restore player state after reconnection
     private void RestorePlayerState() {
         if (player != null) {
@@ -1089,7 +1408,7 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         if (!isPaused) {
             // Application resumed
             if (!PhotonNetwork.IsConnected && !isReconnecting) {
-                StartCoroutine(TryReconnect());
+                StartCoroutine(HandleReconnection());
             }
         }
     }
@@ -1098,7 +1417,7 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         if (hasFocus) {
             // Application gained focus
             if (!PhotonNetwork.IsConnected && !isReconnecting) {
-                StartCoroutine(TryReconnect());
+                StartCoroutine(HandleReconnection());
             }
         }
     }
@@ -1718,5 +2037,55 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         // Make sure cursor is visible and unlocked
         Cursor.visible = true;
         Cursor.lockState = CursorLockMode.None;
+    }
+
+    private void ResetGameState()
+    {
+        playerStats.Clear();
+        killStreaks.Clear();
+        botKills.Clear();
+        processedKills.Clear();
+        currentGameTime = 0f;
+        isGameActive = false;
+        isReconnecting = false;
+        wasInRoom = false;
+        lastRoomName = null;
+        cachedGameState = null;
+        
+        // Reset UI
+        if (scoreText != null) scoreText.text = "Score: 0";
+        if (killsText != null) killsText.text = "Kills: 0";
+        if (timerText != null) timerText.text = FormatTime(0);
+    }
+
+    private IEnumerator ClearConnectionText()
+    {
+        yield return new WaitForSeconds(3f);
+        if (connectionText != null)
+        {
+            connectionText.text = "";
+        }
+    }
+
+    private IEnumerator AdjustNPCCount()
+    {
+        yield return new WaitForSeconds(1f); // Wait for player count to update
+        
+        if (!PhotonNetwork.IsMasterClient) yield break;
+        
+        int playerCount = PhotonNetwork.CurrentRoom.PlayerCount;
+        int requiredNPCs = CalculateRequiredNPCCount(playerCount);
+        
+        // Update maxNPCs and room properties
+        maxNPCs = requiredNPCs;
+        ExitGames.Client.Photon.Hashtable properties = new ExitGames.Client.Photon.Hashtable()
+        {
+            {"NPCCount", requiredNPCs},
+            {"TotalPlayers", playerCount + requiredNPCs}
+        };
+        PhotonNetwork.CurrentRoom.SetCustomProperties(properties);
+        
+        // Adjust actual NPC count in game
+        CleanupAndMaintainNPCs();
     }
 }
