@@ -3,9 +3,6 @@ using UnityEngine;
 using UnityEngine.AI;
 using System.Collections;
 using System.Collections.Generic;
-using System.Linq;
-using System;
-using UnityRandom = UnityEngine.Random;
 
 [RequireComponent(typeof(NavMeshAgent))]
 [RequireComponent(typeof(PhotonView))]
@@ -70,9 +67,6 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
     private NPCTpsGun npcGun;
     private Transform currentTarget;
 
-    private bool isAgentReady = false;
-    private const float NAV_MESH_SAMPLE_DISTANCE = 5f;
-
     private void Awake()
     {
         // Get components
@@ -136,9 +130,9 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
 
     private void Start()
     {
-        if (PhotonNetwork.IsMasterClient)
+        if (!isInitialized)
         {
-            StartCoroutine(InitializeNavMeshAgent());
+            InitializeNPC();
         }
         npcGun = GetComponentInChildren<NPCTpsGun>();
 
@@ -150,57 +144,49 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
             $"\nPosition: {transform.position}");
     }
 
-    private IEnumerator InitializeNavMeshAgent()
+    public void InitializeNPC()
     {
-        // Wait a frame to ensure everything is set up
-        yield return new WaitForEndOfFrame();
-
+        // Configure NavMeshAgent for proper movement
         if (agent != null)
         {
-            // Try to find a valid position on the NavMesh
+            agent.speed = moveSpeed;
+            agent.stoppingDistance = 1f;
+            agent.autoBraking = true;
+            agent.acceleration = 16f;  // Faster acceleration
+            agent.angularSpeed = 360f; // Faster turning
+            agent.avoidancePriority = Random.Range(20, 80);
+            
+            // Ensure agent is on the NavMesh
             NavMeshHit hit;
-            if (NavMesh.SamplePosition(transform.position, out hit, NAV_MESH_SAMPLE_DISTANCE, NavMesh.AllAreas))
+            if (NavMesh.SamplePosition(transform.position, out hit, 1.0f, NavMesh.AllAreas))
             {
-                // Warp the agent to the valid position
                 agent.Warp(hit.position);
-                agent.enabled = true;
-                isAgentReady = true;
-                Debug.Log($"NPC {gameObject.name} initialized on NavMesh at position: {hit.position}");
-            }
-            else
-            {
-                Debug.LogWarning($"Could not find valid NavMesh position for NPC {gameObject.name}. Retrying...");
-                // Try to find a valid spawn point
-                Transform[] spawnPoints = GameObject.FindObjectsOfType<Transform>()
-                    .Where(t => t.CompareTag("SpawnPoint"))
-                    .ToArray();
-
-                if (spawnPoints.Length > 0)
-                {
-                    foreach (Transform spawnPoint in spawnPoints)
-                    {
-                        if (NavMesh.SamplePosition(spawnPoint.position, out hit, NAV_MESH_SAMPLE_DISTANCE, NavMesh.AllAreas))
-                        {
-                            transform.position = hit.position;
-                            agent.Warp(hit.position);
-                            agent.enabled = true;
-                            isAgentReady = true;
-                            Debug.Log($"NPC {gameObject.name} relocated to valid spawn point: {hit.position}");
-                            break;
-                        }
-                    }
-                }
             }
         }
-
-        if (!isAgentReady)
+        
+        // Initialize animator parameters
+        if (animator != null)
         {
-            Debug.LogError($"Failed to initialize NavMeshAgent for NPC {gameObject.name}. Destroying NPC.");
-            if (PhotonNetwork.IsMasterClient)
-            {
-                PhotonNetwork.Destroy(gameObject);
-            }
+            animator.SetFloat(hashHorizontal, 0f);
+            animator.SetFloat(hashVertical, 0f);
+            animator.SetBool(hashRunning, false);
+            animator.SetBool(hashIsDead, false);
+            
+            // Force animation update
+            animator.Rebind();
+            animator.Update(0f);
+            Debug.Log($"NPC {npcViewID} animator initialized");
         }
+        
+        // For master client, start AI routines
+        if (PhotonNetwork.IsMasterClient)
+        {
+            StartCoroutine(AIRoutine());
+            StartCoroutine(FindPlayerRoutine());
+        }
+        
+        isInitialized = true;
+        Debug.Log($"NPC {npcViewID} fully initialized. Is Master: {PhotonNetwork.IsMasterClient}");
     }
 
     private void OnEnable()
@@ -483,13 +469,13 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
     {
         Debug.Log($"NPC {npcViewID} started AI routine");
         
-        yield return new WaitForSeconds(UnityRandom.Range(0.1f, 0.5f));
+        yield return new WaitForSeconds(Random.Range(0.1f, 0.5f));
         
         while (!isDead)
         {
             if (agent != null && agent.isOnNavMesh && !isMoving)
             {
-                Vector3 randomPos = startPosition + UnityRandom.insideUnitSphere * patrolRadius;
+                Vector3 randomPos = startPosition + Random.insideUnitSphere * patrolRadius;
                 randomPos.y = transform.position.y;
 
                 NavMeshHit hit;
@@ -519,18 +505,15 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
                 }
             }
 
-            yield return new WaitForSeconds(UnityRandom.Range(minWaitTime, maxWaitTime));
+            yield return new WaitForSeconds(Random.Range(minWaitTime, maxWaitTime));
         }
     }
 
     private IEnumerator FindPlayerRoutine()
     {
-        while (true)
+        while (!isDead)
         {
-            if (isAgentReady && agent != null && agent.enabled)
-            {
-                FindAndAttackPlayer();
-            }
+            FindAndAttackPlayer();
             yield return new WaitForSeconds(0.5f);
         }
     }
@@ -571,7 +554,7 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
 
     private void FindAndAttackPlayer()
     {
-        if (Time.time < nextAttackTime || isStuck || !agent.isOnNavMesh) return;
+        if (Time.time < nextAttackTime || isStuck) return;
 
         Collider[] colliders = Physics.OverlapSphere(transform.position, detectionRange);
         Transform nearestPlayer = null;
@@ -592,12 +575,13 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
                 if (distance < nearestDistance)
                 {
                     NavMeshPath path = new NavMeshPath();
-                    if (agent.isOnNavMesh && NavMesh.CalculatePath(transform.position, col.transform.position, NavMesh.AllAreas, path))
+                    if (NavMesh.CalculatePath(transform.position, col.transform.position, NavMesh.AllAreas, path))
                     {
                         if (path.status == NavMeshPathStatus.PathComplete)
                         {
+                            // Calculate actual path length
                             float pathLength = CalculatePathLength(path);
-                            if (pathLength < nearestDistance * 1.5f)
+                            if (pathLength < nearestDistance * 1.5f) // Allow slightly longer paths if they're valid
                             {
                                 nearestDistance = distance;
                                 nearestPlayer = col.transform;
@@ -609,13 +593,14 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
             }
         }
 
-        if (nearestPlayer != null && bestPath != null && agent.isOnNavMesh)
+        if (nearestPlayer != null && bestPath != null)
         {
             Vector3 directionToPlayer = (nearestPlayer.position - transform.position).normalized;
             
             if (nearestDistance <= attackRange && CanSeeTarget(nearestPlayer.position))
             {
-                if (agent.isOnNavMesh)
+                // Handle attack logic...
+                if (agent != null)
                 {
                     agent.isStopped = true;
                     isMoving = false;
@@ -638,7 +623,8 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
             }
             else if (nearestDistance <= detectionRange)
             {
-                if (agent.isOnNavMesh && !isRepositioning)
+                // Use the pre-calculated path
+                if (agent != null && !isRepositioning)
                 {
                     agent.isStopped = false;
                     agent.speed = moveSpeed * 1.5f;
@@ -908,7 +894,7 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
         // Try to find alternative paths with more varied positions
         for (int i = 0; i < 8; i++)
         {
-            Vector3 randomOffset = Quaternion.Euler(0, i * 45f, 0) * Vector3.forward * UnityRandom.Range(3f, 7f);
+            Vector3 randomOffset = Quaternion.Euler(0, i * 45f, 0) * Vector3.forward * Random.Range(3f, 7f);
             Vector3 alternativeTarget = transform.position + randomOffset;
 
             NavMeshHit hit;
@@ -1029,7 +1015,7 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
 
     private void ResetChaseState()
     {
-        if (agent != null && agent.isOnNavMesh)
+        if (agent != null)
         {
             agent.isStopped = false;
             agent.speed = moveSpeed;
@@ -1038,151 +1024,11 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
         {
             npcGun.ResetAiming();
         }
-        if (isMoving && agent != null && agent.isOnNavMesh && !agent.hasPath)
+        if (isMoving && !agent.hasPath)
         {
             isMoving = false;
         }
         isStuck = false;
         pathRetryCount = 0;
-    }
-
-    private GameObject FindNearestPlayer()
-    {
-        Collider[] colliders = Physics.OverlapSphere(transform.position, detectionRange);
-        GameObject nearestPlayer = null;
-        float nearestDistance = float.MaxValue;
-
-        foreach (Collider col in colliders)
-        {
-            if (col.CompareTag("Player"))
-            {
-                float distance = Vector3.Distance(transform.position, col.transform.position);
-                if (distance < nearestDistance)
-                {
-                    nearestDistance = distance;
-                    nearestPlayer = col.gameObject;
-                }
-            }
-        }
-
-        return nearestPlayer;
-    }
-
-    private void MoveToPosition(Vector3 position)
-    {
-        if (!isAgentReady || agent == null || !agent.enabled)
-        {
-            return;
-        }
-
-        try
-        {
-            NavMeshPath path = new NavMeshPath();
-            if (agent.CalculatePath(position, path))
-            {
-                agent.SetPath(path);
-            }
-        }
-        catch (Exception e)
-        {
-            Debug.LogError($"Error in MoveToPosition for NPC {gameObject.name}: {e.Message}");
-        }
-    }
-
-    private bool IsOnNavMesh()
-    {
-        if (agent == null) return false;
-
-        NavMeshHit hit;
-        return NavMesh.SamplePosition(transform.position, out hit, 0.1f, NavMesh.AllAreas);
-    }
-
-    public void ValidatePosition()
-    {
-        if (agent == null || !agent.enabled) return;
-
-        NavMeshHit hit;
-        if (!NavMesh.SamplePosition(transform.position, out hit, NAV_MESH_SAMPLE_DISTANCE, NavMesh.AllAreas))
-        {
-            Debug.LogWarning($"NPC {gameObject.name} is not on NavMesh. Attempting to fix position.");
-            // Try to find a valid position nearby
-            Vector3[] directions = new Vector3[] 
-            {
-                Vector3.forward, Vector3.back, Vector3.left, Vector3.right,
-                Vector3.forward + Vector3.left, Vector3.forward + Vector3.right,
-                Vector3.back + Vector3.left, Vector3.back + Vector3.right
-            };
-
-            foreach (Vector3 direction in directions)
-            {
-                Vector3 testPosition = transform.position + direction * NAV_MESH_SAMPLE_DISTANCE;
-                if (NavMesh.SamplePosition(testPosition, out hit, NAV_MESH_SAMPLE_DISTANCE, NavMesh.AllAreas))
-                {
-                    agent.Warp(hit.position);
-                    Debug.Log($"Fixed position for NPC {gameObject.name}");
-                    return;
-                }
-            }
-
-            // If we couldn't find a valid position, disable the agent
-            Debug.LogError($"Could not find valid NavMesh position for NPC {gameObject.name}. Disabling NavMeshAgent.");
-            agent.enabled = false;
-            isAgentReady = false;
-        }
-    }
-
-    void FixedUpdate()
-    {
-        if (PhotonNetwork.IsMasterClient && isAgentReady && agent != null && agent.enabled)
-        {
-            // Periodically validate position
-            if (Time.frameCount % 60 == 0) // Check every 60 frames
-            {
-                ValidatePosition();
-            }
-        }
-    }
-
-    public void InitializeNPC()
-    {
-        if (agent == null)
-        {
-            agent = GetComponent<NavMeshAgent>();
-        }
-        
-        if (agent != null)
-        {
-            // Ensure agent is enabled and properly placed on NavMesh
-            if (!agent.enabled)
-            {
-                agent.enabled = true;
-            }
-            
-            NavMeshHit hit;
-            if (NavMesh.SamplePosition(transform.position, out hit, NAV_MESH_SAMPLE_DISTANCE, NavMesh.AllAreas))
-            {
-                transform.position = hit.position;
-                agent.Warp(hit.position);
-            }
-        }
-        
-        // Set up state variables
-        isDead = false;
-        isMoving = false;
-        isStuck = false;
-        lastPosition = transform.position;
-        lastMovementTime = Time.time;
-        pathRetryCount = 0;
-        lastSafePosition = transform.position;
-        isAgentReady = true;
-        isInitialized = true;
-        
-        // Start AI behavior
-        if (PhotonNetwork.IsMasterClient)
-        {
-            StartCoroutine(AIRoutine());
-        }
-        
-        Debug.Log($"NPC {name} initialized successfully");
     }
 }

@@ -60,6 +60,9 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     [SerializeField]
     private Button reloadButton;
 
+    [SerializeField]
+    private LocalStorageManager localStorageManager;
+
     private GameObject player;
     private Queue<string> messages;
     private const int messageCount = 10;
@@ -128,6 +131,39 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     /// any of the Update methods is called the first time.
     /// </summary>
     void Start() {
+        // Ensure we have a LocalStorageManager
+        if (localStorageManager == null) {
+            localStorageManager = GetComponent<LocalStorageManager>();
+            if (localStorageManager == null) {
+                localStorageManager = gameObject.AddComponent<LocalStorageManager>();
+            }
+        }
+
+        // Try to get wallet address from local storage using the specific key
+        string addressKeyTest = "wallet_address_test"; // You can change this to any key you want
+        string addressKey = "wallet_address"; // You can change this to any key you want
+        string addressKey1 = "wallet_address1"; // You can change this to any key you want
+        string walletAddress = localStorageManager.GetData(addressKey);
+        string walletAddressTest = localStorageManager.GetData(addressKeyTest);
+        string walletAddress1 = localStorageManager.GetData(addressKey1);
+
+        Debug.Log($"~~~Found wallet address: {walletAddress}");
+        Debug.Log($"~~~Found wallet address test: {walletAddressTest}");
+        Debug.Log($"~~~Found wallet address1: {walletAddress1}");
+
+        if (!string.IsNullOrEmpty(walletAddress)) {
+            Debug.Log($"Found wallet address: {walletAddress}");
+            // Use the wallet address as needed
+        } else {
+            Debug.Log("No wallet address found in local storage");
+            
+            // Optionally set a test address for development
+            #if UNITY_EDITOR || UNITY_WEBGL
+            string testAddress = "0x123456789abcdef0123456789abcdef012345678";
+            localStorageManager.TestStorageWithKey(addressKeyTest, testAddress);
+            #endif
+        }
+        
         messages = new Queue<string>(messageCount);
         if (PlayerPrefs.HasKey(nickNamePrefKey)) {
             username.text = PlayerPrefs.GetString(nickNamePrefKey);
@@ -135,7 +171,7 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         
         PhotonNetwork.AutomaticallySyncScene = true;
         PhotonNetwork.ConnectUsingSettings();
-        connectionText.text = "Connecting to lobby...";
+        connectionText.text = "Connecting to server...";
         
         // Initialize UI
         scoreText.text = "Score: 0";
@@ -192,7 +228,7 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             PhotonNetwork.ConnectUsingSettings();
             if (connectionText != null)
             {
-                connectionText.text = "Connecting to lobby...";
+                connectionText.text = "Connecting to server...";
             }
         }
     }
@@ -254,53 +290,33 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             cachedGameState = new Dictionary<string, object>();
         }
 
-        try
+        // Cache player stats
+        cachedGameState["PlayerStats"] = new Dictionary<string, PlayerStats>(playerStats);
+        cachedGameState["KillStreaks"] = new Dictionary<string, int>(killStreaks);
+        cachedGameState["BotKills"] = new Dictionary<string, int>(botKills);
+        
+        // Cache room information if in a room
+        if (PhotonNetwork.InRoom)
         {
-            // Cache player stats
-            cachedGameState["PlayerStats"] = new Dictionary<string, PlayerStats>(playerStats);
-            cachedGameState["KillStreaks"] = new Dictionary<string, int>(killStreaks);
-            cachedGameState["BotKills"] = new Dictionary<string, int>(botKills);
-            
-            // Always cache these core values (even if we're not in a room)
+            cachedGameState["RoomName"] = PhotonNetwork.CurrentRoom.Name;
             cachedGameState["GameTime"] = currentGameTime;
             cachedGameState["IsGameActive"] = isGameActive;
             cachedGameState["MaxNPCs"] = maxNPCs;
             
-            // Cache room information if in a room
-            if (PhotonNetwork.InRoom)
+            // Cache room properties - Fix type conversion issue
+            if (PhotonNetwork.CurrentRoom.CustomProperties != null)
             {
-                cachedGameState["RoomName"] = PhotonNetwork.CurrentRoom.Name;
-                
-                // Cache room properties safely
-                if (PhotonNetwork.CurrentRoom.CustomProperties != null)
+                // Create a copy instead of casting the Hashtable directly
+                ExitGames.Client.Photon.Hashtable propsCopy = new ExitGames.Client.Photon.Hashtable();
+                foreach (var prop in PhotonNetwork.CurrentRoom.CustomProperties)
                 {
-                    // Create a copy instead of casting the Hashtable directly
-                    ExitGames.Client.Photon.Hashtable propsCopy = new ExitGames.Client.Photon.Hashtable();
-                    foreach (var prop in PhotonNetwork.CurrentRoom.CustomProperties)
-                    {
-                        propsCopy.Add(prop.Key, prop.Value);
-                    }
-                    cachedGameState["RoomProperties"] = propsCopy;
+                    propsCopy.Add(prop.Key, prop.Value);
                 }
-                else
-                {
-                    // Create an empty hashtable if no properties exist
-                    cachedGameState["RoomProperties"] = new ExitGames.Client.Photon.Hashtable();
-                }
+                cachedGameState["RoomProperties"] = propsCopy;
             }
-            else
-            {
-                // Add default values even if not in a room
-                cachedGameState["RoomName"] = "";
-                cachedGameState["RoomProperties"] = new ExitGames.Client.Photon.Hashtable();
-            }
+        }
 
-            Debug.Log("Game state cached successfully with all required keys");
-        }
-        catch (System.Exception e)
-        {
-            Debug.LogError($"Error caching game state: {e.Message}");
-        }
+        Debug.Log("Game state cached successfully");
     }
 
     private IEnumerator HandleReconnection()
@@ -312,7 +328,16 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         }
 
         isReconnectionInProgress = true;
+        
+        // Cache state before disconnection
         CacheGameState();
+        
+        // Remember we were in a room if we were
+        if (PhotonNetwork.InRoom) {
+            wasInRoom = true;
+            lastRoomName = PhotonNetwork.CurrentRoom.Name;
+            Debug.Log($"Caching room name for reconnection: {lastRoomName}");
+        }
 
         int attemptCount = 0;
         float startTime = Time.time;
@@ -330,6 +355,7 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
 
             bool connectionStarted = false;
             
+            // Move the try-catch to only wrap the connection attempt
             try
             {
                 PhotonNetwork.ConnectUsingSettings();
@@ -342,19 +368,40 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
 
             if (connectionStarted)
             {
-                // Wait for connection outside try-catch
+                // Wait for connection
                 float waitTime = 0;
-                while (waitTime < reconnectionDelay)
+                float maxWaitTime = 5f; // 5 seconds max wait per reconnection attempt
+                
+                while (waitTime < maxWaitTime)
                 {
                     if (PhotonNetwork.IsConnected)
                     {
-                        // Start game state restoration
-                        StartCoroutine(RestoreGameState());
-                        isReconnectionInProgress = false;
-                        yield break;
+                        // Mark that we're reconnecting so OnConnectedToMaster knows to rejoin room
+                        isReconnecting = true;
+                        Debug.Log("Connection reestablished, waiting for server callbacks");
+                        yield return new WaitForSeconds(1f);
+                        
+                        // After a successful connection, wait a bit more to let callbacks complete
+                        float callbackWaitTime = 0;
+                        while (callbackWaitTime < 5f && !PhotonNetwork.InRoom && wasInRoom)
+                        {
+                            callbackWaitTime += 0.5f;
+                            yield return new WaitForSeconds(0.5f);
+                        }
+                        
+                        // If we've reconnected and rejoined the room, we're done
+                        if (PhotonNetwork.InRoom)
+                        {
+                            Debug.Log("Successfully rejoined room after reconnection");
+                            isReconnectionInProgress = false;
+                            
+                            // Restore remaining game state
+                            StartCoroutine(RestoreGameState());
+                            yield break;
+                        }
                     }
-                    waitTime += 0.1f;
-                    yield return new WaitForSeconds(0.1f);
+                    waitTime += 0.5f;
+                    yield return new WaitForSeconds(0.5f);
                 }
             }
 
@@ -378,73 +425,65 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         Debug.Log("Restoring game state...");
 
         // Wait for connection to be ready
-        while (!PhotonNetwork.IsConnectedAndReady)
+        float connectionTimeout = 0f;
+        while (!PhotonNetwork.IsConnectedAndReady && connectionTimeout < 10f)
         {
+            connectionTimeout += 0.1f;
             yield return new WaitForSeconds(0.1f);
         }
 
-        bool roomJoinAttempted = false;
-        bool roomJoinSuccessful = false;
-
-        try
+        if (!PhotonNetwork.IsConnectedAndReady)
         {
-            if (cachedGameState.ContainsKey("RoomName"))
-            {
-                string roomName = (string)cachedGameState["RoomName"];
-                
-                // Try to rejoin the room
-                try
-                {
-                    roomJoinAttempted = true;
-                    roomJoinSuccessful = PhotonNetwork.RejoinRoom(roomName);
-                }
-                catch (System.Exception e)
-                {
-                    Debug.LogError($"Failed to rejoin room: {e.Message}");
-                }
-
-                if (!roomJoinSuccessful && roomJoinAttempted)
-                {
-                    // If rejoin fails, try to join as new player
-                    RoomOptions options = new RoomOptions
-                    {
-                        MaxPlayers = MAX_ROOM_CAPACITY
-                    };
-                    
-                    if (cachedGameState.ContainsKey("RoomProperties"))
-                    {
-                        options.CustomRoomProperties = 
-                            cachedGameState["RoomProperties"] as ExitGames.Client.Photon.Hashtable;
-                    }
-                    
-                    PhotonNetwork.JoinOrCreateRoom(roomName, options, TypedLobby.Default);
-                }
-            }
-            else
-            {
-                PhotonNetwork.JoinLobby();
-            }
-        }
-        catch (System.Exception e)
-        {
-            Debug.LogError($"Error during room join: {e.Message}");
+            Debug.LogError("Failed to establish connection");
             HandleReconnectionFailure();
             yield break;
         }
 
-        // Wait for room join outside try-catch
-        if (roomJoinAttempted)
+        // Handle room joining outside the try block
+        if (!PhotonNetwork.InRoom)
         {
-            float joinTimeout = 0f;
-            while (!PhotonNetwork.InRoom && joinTimeout < 10f)
+            if (wasInRoom && !string.IsNullOrEmpty(lastRoomName))
             {
-                joinTimeout += 0.1f;
-                yield return new WaitForSeconds(0.1f);
+                Debug.Log($"Attempting to rejoin room: {lastRoomName}");
+                bool rejoinResult = false;
+                
+                try
+                {
+                    rejoinResult = PhotonNetwork.RejoinRoom(lastRoomName);
+                }
+                catch (System.Exception e)
+                {
+                    Debug.LogError($"Failed to rejoin room: {e.Message}");
+                    // Don't handle failure here, let the timeout handle it
+                }
+                
+                Debug.Log($"Rejoin attempt result: {rejoinResult}");
+                
+                if (rejoinResult)
+                {
+                    // Wait for rejoin outside try block
+                    float joinTimeout = 0f;
+                    while (!PhotonNetwork.InRoom && joinTimeout < 10f)
+                    {
+                        joinTimeout += 0.5f;
+                        yield return new WaitForSeconds(0.5f);
+                    }
+                }
+                
+                if (!PhotonNetwork.InRoom)
+                {
+                    // Only handle as failure if we were actually trying to reconnect
+                    if (isReconnecting)
+                    {
+                        Debug.LogError("Failed to rejoin room after reconnection");
+                        HandleReconnectionFailure();
+                    }
+                    yield break;
+                }
             }
-
-            if (!PhotonNetwork.InRoom)
+            else if (isReconnecting) // Only show error if we were trying to reconnect
             {
-                Debug.LogError("Failed to join room within timeout period");
+                Debug.LogError("Not in a room and no cached room to rejoin");
                 HandleReconnectionFailure();
                 yield break;
             }
@@ -453,7 +492,10 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         try
         {
             // Restore game state
-            RestoreGameData();
+            RestorePlayerData();
+            
+            // Respawn the player
+            Respawn(0.0f);
             
             // If master client, restore NPCs
             if (PhotonNetwork.IsMasterClient)
@@ -463,138 +505,54 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
 
             Debug.Log("Game state restored successfully");
             
-            if (connectionText != null)
+            if (connectionText != null && isReconnecting)
             {
                 connectionText.text = "Reconnected successfully!";
                 StartCoroutine(ClearConnectionText());
             }
+            
+            // Reset reconnection flags
+            isReconnecting = false;
+            wasInRoom = false;
+            lastRoomName = null;
         }
         catch (System.Exception e)
         {
             Debug.LogError($"Error restoring game state: {e.Message}");
-            HandleReconnectionFailure();
+            if (isReconnecting)
+            {
+                HandleReconnectionFailure();
+            }
         }
     }
 
-    // Update the RestoreGameData method to fix the GameTime key error
-    private void RestoreGameData()
+    // Add this helper method to handle game data restoration
+    private void RestorePlayerData()
     {
-        // Restore player stats if available
         if (cachedGameState.ContainsKey("PlayerStats"))
         {
-            try
-            {
-                playerStats = new Dictionary<string, PlayerStats>(
-                    (Dictionary<string, PlayerStats>)cachedGameState["PlayerStats"]);
-            }
-            catch (System.Exception e)
-            {
-                Debug.LogWarning($"Error restoring player stats: {e.Message}");
-                // Initialize with empty dictionary if restoration fails
-                playerStats = new Dictionary<string, PlayerStats>();
-            }
+            playerStats = new Dictionary<string, PlayerStats>(
+                (Dictionary<string, PlayerStats>)cachedGameState["PlayerStats"]);
         }
         
-        // Restore kill streaks if available
         if (cachedGameState.ContainsKey("KillStreaks"))
         {
-            try
-            {
-                killStreaks = new Dictionary<string, int>(
-                    (Dictionary<string, int>)cachedGameState["KillStreaks"]);
-            }
-            catch (System.Exception e)
-            {
-                Debug.LogWarning($"Error restoring kill streaks: {e.Message}");
-                // Initialize with empty dictionary if restoration fails
-                killStreaks = new Dictionary<string, int>();
-            }
+            killStreaks = new Dictionary<string, int>(
+                (Dictionary<string, int>)cachedGameState["KillStreaks"]);
         }
         
-        // Restore bot kills if available
         if (cachedGameState.ContainsKey("BotKills"))
         {
-            try
-            {
-                botKills = new Dictionary<string, int>(
-                    (Dictionary<string, int>)cachedGameState["BotKills"]);
-            }
-            catch (System.Exception e)
-            {
-                Debug.LogWarning($"Error restoring bot kills: {e.Message}");
-                // Initialize with empty dictionary if restoration fails
-                botKills = new Dictionary<string, int>();
-            }
+            botKills = new Dictionary<string, int>(
+                (Dictionary<string, int>)cachedGameState["BotKills"]);
         }
 
-        // Restore game time with safe default
-        if (cachedGameState.ContainsKey("GameTime"))
-        {
-            try
-            {
-                currentGameTime = (float)cachedGameState["GameTime"];
-            }
-            catch (System.Exception e)
-            {
-                Debug.LogWarning($"Error restoring game time: {e.Message}");
-                // Set a default time if restoration fails
-                currentGameTime = 300f; // Default 5 minutes
-            }
-        }
-        else
-        {
-            // If GameTime key not found, use a default value
-            currentGameTime = 300f; // Default 5 minutes
-            Debug.Log("GameTime not found in cached state, using default value (5 minutes)");
-        }
+        // Restore game time and state
+        currentGameTime = (float)cachedGameState["GameTime"];
+        isGameActive = (bool)cachedGameState["IsGameActive"];
+        maxNPCs = (int)cachedGameState["MaxNPCs"];
 
-        // Restore game active state with safe default
-        if (cachedGameState.ContainsKey("IsGameActive"))
-        {
-            try
-            {
-                isGameActive = (bool)cachedGameState["IsGameActive"];
-            }
-            catch (System.Exception e)
-            {
-                Debug.LogWarning($"Error restoring game active state: {e.Message}");
-                // Set default to true if restoration fails
-                isGameActive = true;
-            }
-        }
-        else
-        {
-            // If IsGameActive key not found, default to true
-            isGameActive = true;
-            Debug.Log("IsGameActive not found in cached state, defaulting to true");
-        }
-
-        // Restore max NPCs with safe default
-        if (cachedGameState.ContainsKey("MaxNPCs"))
-        {
-            try
-            {
-                maxNPCs = (int)cachedGameState["MaxNPCs"];
-            }
-            catch (System.Exception e)
-            {
-                Debug.LogWarning($"Error restoring NPC count: {e.Message}");
-                // Calculate a default based on room capacity if restoration fails
-                maxNPCs = PhotonNetwork.InRoom ? 
-                    MAX_ROOM_CAPACITY - PhotonNetwork.CurrentRoom.PlayerCount : 
-                    MAX_ROOM_CAPACITY / 2; // Default to half capacity if not in room
-            }
-        }
-        else
-        {
-            // If MaxNPCs key not found, calculate a default value
-            maxNPCs = PhotonNetwork.InRoom ? 
-                MAX_ROOM_CAPACITY - PhotonNetwork.CurrentRoom.PlayerCount : 
-                MAX_ROOM_CAPACITY / 2; // Default to half capacity if not in room
-            Debug.Log($"MaxNPCs not found in cached state, calculated default ({maxNPCs})");
-        }
-
-        // Update UI for local player if stats are available
+        // Update UI
         if (PhotonNetwork.LocalPlayer != null && 
             playerStats.ContainsKey(PhotonNetwork.LocalPlayer.NickName))
         {
@@ -603,42 +561,40 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
                 playerStats[PhotonNetwork.LocalPlayer.NickName].Kills
             );
         }
-        else
-        {
-            // Reset UI if player stats not available
-            UpdateUIStats(0, 0);
-        }
-        
-        // Update timer display
-        if (timerText != null)
-        {
-            timerText.text = FormatTime(currentGameTime);
-        }
-        
-        Debug.Log("Game state restoration completed with safe defaults");
     }
 
     private void HandleReconnectionFailure()
     {
         Debug.LogError("Reconnection failed after maximum attempts");
         
-        if (connectionText != null)
+        if (isReconnecting) // Only show reconnection failure if we were actually trying to reconnect
         {
-            connectionText.text = "Failed to reconnect. Please restart the game.";
-        }
+            if (connectionText != null)
+            {
+                connectionText.text = "Failed to reconnect. Please restart the game.";
+            }
 
-        // Reset game state
-        ResetGameState();
-        
-        // Show server window
-        if (serverWindow != null)
-        {
-            serverWindow.SetActive(true);
-        }
+            // Reset game state
+            ResetGameState();
+            
+            // Show server window
+            if (serverWindow != null)
+            {
+                serverWindow.SetActive(true);
+            }
 
-        // Reset cursor
+            // Reset cursor
             Cursor.visible = true;
-        Cursor.lockState = CursorLockMode.None;
+            Cursor.lockState = CursorLockMode.None;
+        }
+        else 
+        {
+            // For first-time connection failures, show a more appropriate message
+            if (connectionText != null)
+            {
+                connectionText.text = "Unable to connect. Please check your internet connection.";
+            }
+        }
     }
 
     private IEnumerator RestoreNPCs()
@@ -711,44 +667,41 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
 
             int currentPlayerCount = roomPlayerCounts.ContainsKey(room.Name) ? 
                 roomPlayerCounts[room.Name] : room.PlayerCount;
-
+            
             int npcCount = 0;
             if (room.CustomProperties.ContainsKey("NPCCount")) {
                 npcCount = (int)room.CustomProperties["NPCCount"];
             }
-            
-            int totalCount = currentPlayerCount + npcCount;
 
-            string roomStatus = GetRoomStatusText(room, currentPlayerCount, npcCount);
+            string roomStatus = GetRoomStatusText(room, currentPlayerCount);
             
             roomList.text += $"Room: {room.Name}\n" +
                             $"Players: {currentPlayerCount}/{MAX_ROOM_CAPACITY}\n" +
                             $"NPCs: {npcCount}\n" +
-                            $"Total: {totalCount}/{MAX_ROOM_CAPACITY}\n" +
+                            $"Total: {currentPlayerCount + npcCount}/{MAX_ROOM_CAPACITY}\n" +
                             $"Status: {roomStatus}\n" +
                             GetRoomCustomPropertiesText(room) +
                             "-------------------\n";
         }
     }
 
-    private string GetRoomStatusText(RoomInfo room, int currentPlayerCount, int npcCount) {
+    private string GetRoomStatusText(RoomInfo room, int currentPlayerCount) {
         if (!room.IsOpen) return "Closed";
+        
+        int npcCount = 0;
+        if (room.CustomProperties.ContainsKey("NPCCount")) {
+            npcCount = (int)room.CustomProperties["NPCCount"];
+        }
         
         int totalCount = currentPlayerCount + npcCount;
         
-        // Only show "Full" if the room is actually filled with real players
         if (currentPlayerCount >= MAX_ROOM_CAPACITY) return "Full";
-        
-        // Show game state if available
         if (room.CustomProperties.ContainsKey("GameState")) {
             string gameState = (string)room.CustomProperties["GameState"];
-            if (gameState == "InProgress") return $"In Progress ({totalCount}/{MAX_ROOM_CAPACITY})";
-            if (gameState == "Ending") return $"Ending ({totalCount}/{MAX_ROOM_CAPACITY})";
+            if (gameState == "InProgress") return "Game in Progress";
+            if (gameState == "Ending") return "Game Ending";
         }
-        
-        // Default status shows available player slots
-        int availableSlots = MAX_ROOM_CAPACITY - currentPlayerCount;
-        return $"Waiting - {availableSlots} slots available";
+        return $"Waiting ({totalCount}/{MAX_ROOM_CAPACITY})";
     }
 
     private string GetRoomCustomPropertiesText(RoomInfo room) {
@@ -799,8 +752,7 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
 
     // Add method to calculate required NPC count
     private int CalculateRequiredNPCCount(int playerCount) {
-        // Always ensure we have a total of MAX_ROOM_CAPACITY entities (players + NPCs)
-        return MAX_ROOM_CAPACITY - playerCount;
+        return Mathf.Min(MAX_ROOM_CAPACITY - playerCount, 8 - playerCount);
     }
 
     // Modify OnJoinedRoom to handle NPC spawning based on player count
@@ -814,25 +766,12 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         if (PhotonNetwork.CurrentRoom.CustomProperties.ContainsKey("GameTime")) {
             float gameTime = (float)PhotonNetwork.CurrentRoom.CustomProperties["GameTime"];
             currentGameTime = gameTime;
-            
-            // Update the timer UI
-            if (timerText != null) {
-                timerText.text = FormatTime(currentGameTime);
-            }
         }
         
         // Start the game timer if master client
         if (PhotonNetwork.IsMasterClient) {
             isGameActive = true;
-            
-            // Synchronize timer and game state with all clients
-            photonView.RPC("SyncGameState", RpcTarget.All, isGameActive, currentGameTime);
-            
-            // Update game state in room properties
-            ExitGames.Client.Photon.Hashtable stateProps = new ExitGames.Client.Photon.Hashtable() {
-                {"GameState", "InProgress"}
-            };
-            PhotonNetwork.CurrentRoom.SetCustomProperties(stateProps);
+            photonView.RPC("SyncTimer", RpcTarget.All, currentGameTime);
         }
         
         Respawn(0.0f);
@@ -878,11 +817,6 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             {"TotalPlayers", playerCount + requiredNPCs}
         };
         PhotonNetwork.CurrentRoom.SetCustomProperties(properties);
-        
-        // If we already have NPCs in the room, adjust their count
-        if (activeNPCs.Count > 0 || PhotonNetwork.InRoom) {
-            StartCoroutine(AdjustNPCCount());
-        }
     }
 
     /// <summary>
@@ -1077,27 +1011,33 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     }
 
     void Update() {
-        if (isGameActive && PhotonNetwork.IsMasterClient) {
-            if (currentGameTime > 0) {
-                currentGameTime -= Time.deltaTime;
-                
-                // Only sync timer every 1 second to reduce network traffic
-                if (Mathf.FloorToInt(currentGameTime) != Mathf.FloorToInt(currentGameTime + Time.deltaTime)) {
-                photonView.RPC("SyncTimer", RpcTarget.All, currentGameTime);
-                }
+        // Update timer on all clients, not just master
+        if (isGameActive) {
+            if (PhotonNetwork.IsMasterClient) {
+                if (currentGameTime > 0) {
+                    currentGameTime -= Time.deltaTime;
+                    // Only send RPC updates at appropriate intervals to reduce network traffic
+                    if (Time.frameCount % 30 == 0) { // Update roughly twice per second
+                        photonView.RPC("SyncTimer", RpcTarget.Others, currentGameTime);
+                    }
 
-                if (currentGameTime <= 0) {
-                    currentGameTime = 0;
-                    isGameActive = false;
-                    
-                    // Update game state in room properties
-                    ExitGames.Client.Photon.Hashtable stateProps = new ExitGames.Client.Photon.Hashtable() {
-                        {"GameState", "Ending"},
-                        {"GameTime", 0f}
-                    };
-                    PhotonNetwork.CurrentRoom.SetCustomProperties(stateProps);
-                    
-                    photonView.RPC("EndGame", RpcTarget.All);
+                    // Update local display every frame
+                    if (timerText != null) {
+                        timerText.text = FormatTime(currentGameTime);
+                    }
+
+                    if (currentGameTime <= 0) {
+                        currentGameTime = 0;
+                        photonView.RPC("EndGame", RpcTarget.All);
+                    }
+                }
+            } else {
+                // Non-master clients should still update their timers smoothly between syncs
+                if (currentGameTime > 0) {
+                    currentGameTime -= Time.deltaTime;
+                    if (timerText != null) {
+                        timerText.text = FormatTime(currentGameTime);
+                    }
                 }
             }
         }
@@ -1151,20 +1091,9 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     // Modify timer synchronization
     [PunRPC]
     void SyncTimer(float time) {
-        // Always update the time, regardless of game state
         currentGameTime = time;
-        
-        // Only update UI if the game is active
         if (timerText != null) {
             timerText.text = FormatTime(currentGameTime);
-        }
-        
-        // Store the time in room properties for reconnecting players
-        if (PhotonNetwork.IsMasterClient && PhotonNetwork.InRoom) {
-            ExitGames.Client.Photon.Hashtable timeProps = new ExitGames.Client.Photon.Hashtable() {
-                {"GameTime", currentGameTime}
-            };
-            PhotonNetwork.CurrentRoom.SetCustomProperties(timeProps);
         }
     }
 
@@ -1362,19 +1291,13 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     public void SetGameActive(bool active) {
         if (PhotonNetwork.IsMasterClient) {
             isGameActive = active;
-            photonView.RPC("SyncGameState", RpcTarget.All, active, currentGameTime);
+            photonView.RPC("SyncGameState", RpcTarget.All, active);
         }
     }
 
     [PunRPC]
-    void SyncGameState(bool active, float gameTime) {
+    void SyncGameState(bool active) {
         isGameActive = active;
-        currentGameTime = gameTime;
-        
-        // Update UI
-        if (timerText != null) {
-            timerText.text = FormatTime(currentGameTime);
-        }
     }
 
     public void ReturnToLobby() {
@@ -1574,7 +1497,7 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         // Sync game state
         if (PhotonNetwork.IsMasterClient) {
             photonView.RPC("SyncTimer", RpcTarget.All, currentGameTime);
-            photonView.RPC("SyncGameState", RpcTarget.All, isGameActive, currentGameTime);
+            photonView.RPC("SyncGameState", RpcTarget.All, isGameActive);
         }
     }
 
@@ -2242,7 +2165,8 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         }
     }
 
-    private IEnumerator AdjustNPCCount() {
+    private IEnumerator AdjustNPCCount()
+    {
         yield return new WaitForSeconds(1f); // Wait for player count to update
         
         if (!PhotonNetwork.IsMasterClient) yield break;
@@ -2252,28 +2176,49 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         
         // Update maxNPCs and room properties
         maxNPCs = requiredNPCs;
-        ExitGames.Client.Photon.Hashtable properties = new ExitGames.Client.Photon.Hashtable() {
+        ExitGames.Client.Photon.Hashtable properties = new ExitGames.Client.Photon.Hashtable()
+        {
             {"NPCCount", requiredNPCs},
             {"TotalPlayers", playerCount + requiredNPCs}
         };
         PhotonNetwork.CurrentRoom.SetCustomProperties(properties);
         
-        // Get current NPC count
-        GameObject[] npcs = GameObject.FindGameObjectsWithTag("NPC");
-        int currentNPCCount = npcs.Length;
-        
-        Debug.Log($"Adjusting NPC count: Current={currentNPCCount}, Required={requiredNPCs}");
-        
-        // Add more NPCs if needed
-        if (currentNPCCount < requiredNPCs) {
-            for (int i = 0; i < requiredNPCs - currentNPCCount; i++) {
-                SpawnNPC();
-                yield return new WaitForSeconds(0.2f); // Add a small delay between spawns
-            }
+        // Adjust actual NPC count in game
+        CleanupAndMaintainNPCs();
+    }
+
+    // You can also add methods to set/get the wallet address from other scripts
+    public void SetPlayerWalletAddress(string address, string key = "wallet_address") {
+        if (localStorageManager != null) {
+            localStorageManager.SetData(key, address);
         }
-        // Remove excess NPCs if needed
-        else if (currentNPCCount > requiredNPCs) {
-            CleanupAndMaintainNPCs();
+    }
+
+    public string GetPlayerWalletAddress(string key = "wallet_address") {
+        if (localStorageManager != null) {
+            return localStorageManager.GetData(key);
+        }
+        return null;
+    }
+
+    public override void OnMasterClientSwitched(Player newMasterClient) {
+        base.OnMasterClientSwitched(newMasterClient);
+        
+        Debug.Log($"Master client switched to {newMasterClient.NickName}");
+        
+        // If we become the new master client, take over game management
+        if (newMasterClient.ActorNumber == PhotonNetwork.LocalPlayer.ActorNumber) {
+            Debug.Log("We are now the master client - taking over game management");
+            
+            // Restore game state from where it was
+            if (isGameActive) {
+                // Continue the game from current time
+                photonView.RPC("SyncTimer", RpcTarget.All, currentGameTime);
+                
+                // Take over NPC management
+                StartCoroutine(NPCMaintenanceRoutine());
+                UpdateRoomNPCCount();
+            }
         }
     }
 }
