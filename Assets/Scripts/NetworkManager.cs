@@ -279,8 +279,25 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             return;
         }
 
-        // Start reconnection process
-        StartCoroutine(HandleReconnection());
+        // Only set isReconnecting to true if we were previously connected
+        if (wasInRoom || PhotonNetwork.IsConnected)
+        {
+            isReconnecting = true;
+            // Start reconnection process
+            StartCoroutine(HandleReconnection());
+        }
+        else
+        {
+            // First time connection failure
+            if (connectionText != null)
+            {
+                connectionText.text = "Unable to connect. Please check your internet connection.";
+            }
+            if (serverWindow != null)
+            {
+                serverWindow.SetActive(true);
+            }
+        }
     }
 
     private void CacheGameState()
@@ -1449,13 +1466,16 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         Debug.LogError($"Failed to join room: {message}");
         
         if (isReconnecting && wasInRoom) {
-            // If rejoining failed, clear the stored room info and join the lobby
+            // If rejoining failed during a reconnection attempt
+            connectionText.text = "Failed to reconnect. Please restart the game.";
             lastRoomName = null;
             wasInRoom = false;
-            PhotonNetwork.JoinLobby(TypedLobby.Default);
+        } else {
+            // First-time connection attempt
+            connectionText.text = "Unable to join room. Please try again.";
         }
         
-        connectionText.text = $"Failed to join room: {message}";
+        PhotonNetwork.JoinLobby(TypedLobby.Default);
         serverWindow.SetActive(true);
     }
 
