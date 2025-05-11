@@ -155,6 +155,7 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         // Start the connection sequence
         StartCoroutine(ConnectionSequence());
 
+        // Add listener for return to lobby button
         if (returnToLobbyButton != null) {
             returnToLobbyButton.onClick.AddListener(ReturnToLobby);
         }
@@ -1934,8 +1935,7 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         // Wait a short moment to ensure everything is disabled properly
         yield return new WaitForSeconds(0.1f);
 
-        if (PhotonNetwork.IsConnected)
-        {
+        if (PhotonNetwork.IsConnected) {
             // Leave the room first
             PhotonNetwork.LeaveRoom();
         }
@@ -1944,13 +1944,11 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         SceneManager.LoadScene(SceneManager.GetActiveScene().name);
         
         // Reset UI elements
-        if (serverWindow != null)
-        {
+        if (serverWindow != null) {
             serverWindow.SetActive(true);
         }
         
-        if (connectionText != null)
-        {
+        if (connectionText != null) {
             connectionText.text = "Connecting to lobby...";
         }
 
@@ -1958,18 +1956,15 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         StartCoroutine(ReconnectAfterReload());
     }
 
-    private IEnumerator ReconnectAfterReload()
-    {
+    private IEnumerator ReconnectAfterReload() {
         yield return new WaitForSeconds(1f); // Wait a moment for the scene to load
         
         // Reconnect to Photon
-        if (!PhotonNetwork.IsConnected)
-        {
+        if (!PhotonNetwork.IsConnected) {
             PhotonNetwork.ConnectUsingSettings();
             
             // Wait for connection
-            while (!PhotonNetwork.IsConnected)
-            {
+            while (!PhotonNetwork.IsConnected) {
                 yield return new WaitForSeconds(0.5f);
             }
             
@@ -1978,12 +1973,10 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         }
         
         // Reset UI
-        if (serverWindow != null)
-        {
+        if (serverWindow != null) {
             serverWindow.SetActive(true);
         }
-        if (connectionText != null)
-        {
+        if (connectionText != null) {
             connectionText.text = "";
         }
 
