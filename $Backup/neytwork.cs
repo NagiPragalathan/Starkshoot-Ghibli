@@ -61,10 +61,9 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     [SerializeField] private float npcSpawnDelay = 5f;
 
     [SerializeField]
-    private Button reloadButton;
-
-    [SerializeField]
     private Text walletText;
+    private Button joinButton;
+    private Text joinButtonText;
 
     private GameObject player;
     private Queue<string> messages;
@@ -122,6 +121,13 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     private bool isWalletConnected = false;
     private string walletAddress = "";
     private bool isDataFetched = false;
+    private bool isStaked = false;
+
+    [Header("Debug Settings")]
+    [SerializeField]
+    private bool testDebugMode = false;
+    [SerializeField]
+    private string testWalletAddress = "0x06C3431c2D3F57BfE4de3A99Af9B53fc4f95197c";
 
     /// <summary>
     /// Start is called on the frame when a script is enabled just before
@@ -129,6 +135,16 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     /// </summary>
     void Start() {
         messages = new Queue<string>(messageCount);
+        
+        // Get the join button and its text from serverWindow
+        if (serverWindow != null)
+        {
+            joinButton = serverWindow.GetComponentInChildren<Button>();
+            if (joinButton != null)
+            {
+                joinButtonText = joinButton.GetComponentInChildren<Text>();
+            }
+        }
         
         // Initialize UI elements
         InitializeUI();
@@ -140,8 +156,8 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     private void InitializeUI()
     {
         // Initialize UI with default values
-        if (scoreText != null) scoreText.text = "Score: 0";
-        if (killsText != null) killsText.text = "Kills: 0";
+        if (scoreText != null) scoreText.text = ": 0";
+        if (killsText != null) killsText.text = ": 0";
         
         // Setup time selection dropdown
         SetupTimeDropdown();
@@ -160,9 +176,40 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         if (walletText != null) {
             walletText.text = "Checking wallet connection...";
         }
+
+        // Initialize join button
+        UpdateJoinButtonState(false, false);
         
         // Initialize player stats
         InitializePlayerStats();
+    }
+
+    private void UpdateJoinButtonState(bool isConnected, bool isStaked = false)
+    {
+        if (joinButton != null)
+        {
+            joinButton.interactable = testDebugMode || (isConnected && isStaked);
+        }
+
+        if (joinButtonText != null)
+        {
+            if (testDebugMode)
+            {
+                joinButtonText.text = "Join Room (Debug Mode)";
+            }
+            else if (!isConnected)
+            {
+                joinButtonText.text = "Please Connect Your Wallet";
+            }
+            else if (!isStaked)
+            {
+                joinButtonText.text = "Please Stake Your Tokens";
+            }
+            else
+            {
+                joinButtonText.text = "Join Room";
+            }
+        }
     }
 
     private IEnumerator ConnectionSequence()
@@ -184,8 +231,19 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     {
         try
         {
-            walletAddress = GetLocalStorageData("walletAddress");
-            isWalletConnected = !string.IsNullOrEmpty(walletAddress);
+            if (testDebugMode)
+            {
+                // Use test wallet address in debug mode
+                walletAddress = testWalletAddress;
+                isWalletConnected = true;
+                Debug.Log($"Debug Mode: Using test wallet address: {walletAddress}");
+            }
+            else
+            {
+                // Normal wallet address retrieval
+                walletAddress = GetLocalStorageData("walletAddress");
+                isWalletConnected = !string.IsNullOrEmpty(walletAddress);
+            }
 
             if (isWalletConnected)
             {
@@ -196,10 +254,11 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
                 }
                 if (walletText != null)
                 {
-                    // Format the wallet address to show first 6 and last 4 characters
                     string formattedAddress = FormatWalletAddress(walletAddress);
                     walletText.text = $"Wallet: {formattedAddress}";
                 }
+                // Enable join button when wallet is connected (staking status will be updated after API call)
+                UpdateJoinButtonState(true, false);
             }
             else
             {
@@ -220,6 +279,8 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
                         username.text = PlayerPrefs.GetString(nickNamePrefKey);
                     }
                 }
+                // Disable join button when wallet is not connected
+                UpdateJoinButtonState(false, false);
             }
         }
         catch (System.Exception e)
@@ -234,6 +295,8 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             {
                 walletText.text = "Oops! Wallet Not Connected!";
             }
+            // Disable join button on error
+            UpdateJoinButtonState(false, false);
         }
 
         yield return null;
@@ -253,23 +316,33 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
                 {
                     UserData userData = JsonConvert.DeserializeObject<UserData>(www.downloadHandler.text);
                     
-                    // Set the username from API response
                     if (username != null)
                     {
                         username.text = userData.username;
-                        username.interactable = false; // Make username field non-editable
+                        username.interactable = false;
                     }
 
-                    // Store the username in PlayerPrefs
                     PlayerPrefs.SetString(nickNamePrefKey, userData.username);
                     PlayerPrefs.Save();
 
+                    isStaked = userData.isStaked;
+                    
+                    // Update button state based on staking status and debug mode
+                    UpdateJoinButtonState(true, isStaked);
+
                     isDataFetched = true;
-                    Debug.Log($"Successfully fetched user data for wallet: {walletAddress}");
+                    Debug.Log($"Successfully fetched user data for wallet: {walletAddress}. Staked: {isStaked}");
                     
                     if (connectionText != null)
                     {
-                        connectionText.text = "User data fetched successfully. Connecting to game...";
+                        if (testDebugMode || isStaked)
+                        {
+                            connectionText.text = "User data fetched successfully. Connecting to game...";
+                        }
+                        else
+                        {
+                            connectionText.text = "Please stake your tokens to join the game.";
+                        }
                     }
                 }
                 catch (System.Exception e)
@@ -487,6 +560,13 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             return;
         }
 
+        // Skip staking check if in debug mode
+        if (!testDebugMode && !isStaked)
+        {
+            connectionText.text = "Please stake your tokens to join the game!";
+            return;
+        }
+
         if (!isDataFetched)
         {
             connectionText.text = "Please wait while we fetch your user data...";
@@ -496,7 +576,6 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         serverWindow.SetActive(false);
         connectionText.text = "Joining room...";
         
-        // Use the username from the input field (which should be set from API if wallet is connected)
         PhotonNetwork.LocalPlayer.NickName = username.text;
         PlayerPrefs.SetString(nickNamePrefKey, username.text);
         
@@ -651,14 +730,14 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     private void UpdateUIStats(int score, int kills) {
         // Ensure UI updates happen on the main thread
         if (scoreText != null) {
-            scoreText.text = $"Score: {score}";
+            scoreText.text = $": {score}";
             Debug.Log($"Updated score text to: {score}");
         } else {
             Debug.LogWarning("scoreText is null!");
         }
         
         if (killsText != null) {
-            killsText.text = $"Kills: {kills}";
+            killsText.text = $": {kills}";
             Debug.Log($"Updated kills text to: {kills}");
         } else {
             Debug.LogWarning("killsText is null!");
@@ -1070,9 +1149,9 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         leaderboardPanel = null;
         leaderboardContent = null;
 
-        if (reloadButton != null)
+        if (joinButton != null)
         {
-            reloadButton.onClick.RemoveListener(ReloadScene);
+            joinButton.onClick.RemoveListener(JoinRoom);
         }
     }
 

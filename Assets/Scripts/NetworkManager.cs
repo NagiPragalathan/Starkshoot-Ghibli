@@ -129,6 +129,9 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     [SerializeField]
     private string testWalletAddress = "0x06C3431c2D3F57BfE4de3A99Af9B53fc4f95197c";
 
+    [SerializeField]
+    private Button returnToLobbyButton;
+
     /// <summary>
     /// Start is called on the frame when a script is enabled just before
     /// any of the Update methods is called the first time.
@@ -151,6 +154,10 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         
         // Start the connection sequence
         StartCoroutine(ConnectionSequence());
+
+        if (returnToLobbyButton != null) {
+            returnToLobbyButton.onClick.AddListener(ReturnToLobby);
+        }
     }
 
     private void InitializeUI()
@@ -1115,11 +1122,13 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             leaderboardPanel.SetActive(false);
         }
         
+        // Make sure we're not in a room before loading the new scene
         if (PhotonNetwork.IsConnected) {
             PhotonNetwork.LeaveRoom();
         }
         
-        SceneManager.LoadScene("LobbyScene");
+        // Reload the current scene
+        SceneManager.LoadScene(SceneManager.GetActiveScene().name);
     }
 
     // Add method to safely set UI text
