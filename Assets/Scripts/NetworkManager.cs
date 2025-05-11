@@ -227,6 +227,10 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             wasInRoom = true;
         }
 
+        // Always unlock cursor and make it visible when disconnected
+        Cursor.lockState = CursorLockMode.None;
+        Cursor.visible = true;
+
         // Don't try to reconnect if it was an intended disconnect
         if (cause != DisconnectCause.DisconnectByClientLogic) {
             StartCoroutine(TryReconnect());
@@ -236,13 +240,8 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             connectionText.text = $"Disconnected: {cause}. Attempting to reconnect...";
         }
 
-        // Don't reset the game state immediately
-        if (cause == DisconnectCause.DisconnectByClientLogic) {
-            // Reset game state only if it's an intended disconnect
-            isGameActive = false;
-            Cursor.lockState = CursorLockMode.None;
-            Cursor.visible = true;
-        }
+        // Reset game state
+        isGameActive = false;
     }
 
     /// <summary>
