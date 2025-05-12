@@ -6,11 +6,13 @@ public class LocalStorageManager : MonoBehaviour
     // Default key for wallet address
     private const string DEFAULT_WALLET_KEY = "wallet_address_test";
 
+    #if UNITY_WEBGL && !UNITY_EDITOR
     [DllImport("__Internal")]
     private static extern string GetLocalStorageData(string key);
-
+    
     [DllImport("__Internal")]
     private static extern void SetLocalStorageData(string key, string value);
+    #endif
 
     /// <summary>
     /// Get data from local storage by key

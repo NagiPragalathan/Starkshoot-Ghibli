@@ -5,11 +5,14 @@ using Photon.Pun;
 
 public class HomeButtonController : MonoBehaviour
 {
+    private const string HOME_URL = "https://starkshoot.vercel.app/";
+
+    #if UNITY_WEBGL && !UNITY_EDITOR
     [DllImport("__Internal")]
     private static extern void RedirectToURL(string url);
+    #endif
 
     private Button homeButton;
-    private const string HOME_URL = "https://www.google.com";
 
     void Start()
     {
@@ -27,7 +30,7 @@ public class HomeButtonController : MonoBehaviour
         }
     }
 
-    void OnHomeButtonClick()
+    public void OnHomeButtonClick()
     {
         // Clean up Photon connection if connected
         if (PhotonNetwork.IsConnected)

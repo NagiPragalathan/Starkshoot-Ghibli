@@ -115,8 +115,15 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     private const int TARGET_TOTAL_PLAYERS = 6; // Total players (real + NPCs) we want in the room
     private const int MAX_REAL_PLAYERS = 6; // Maximum number of real players allowed
 
+    #if UNITY_WEBGL && !UNITY_EDITOR
     [DllImport("__Internal")]
     private static extern string GetLocalStorageData(string key);
+    #else
+    private string GetLocalStorageData(string key)
+    {
+        return PlayerPrefs.GetString(key, "");
+    }
+    #endif
 
     private bool isWalletConnected = false;
     private string walletAddress = "";
@@ -249,7 +256,12 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             else
             {
                 // Normal wallet address retrieval
+                #if UNITY_WEBGL && !UNITY_EDITOR
                 walletAddress = GetLocalStorageData("walletAddress");
+                #else
+                walletAddress = PlayerPrefs.GetString("walletAddress", "");
+                #endif
+                
                 isWalletConnected = !string.IsNullOrEmpty(walletAddress);
             }
 

@@ -1,1 +1,9 @@
 330 uncomment that "username.interactable = false;"
+
+
+ui adivanguthu
+video varala 
+back button in joining ui 
+
+remove loadbutton
+
