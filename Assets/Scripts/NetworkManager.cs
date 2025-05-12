@@ -164,8 +164,8 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     private void InitializeUI()
     {
         // Initialize UI with default values
-        if (scoreText != null) scoreText.text = ": 0";
-        if (killsText != null) killsText.text = ": 0";
+        if (scoreText != null) scoreText.text = ":0";
+        if (killsText != null) killsText.text = ":0";
         
         // Setup time selection dropdown
         SetupTimeDropdown();
@@ -327,7 +327,7 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
                     if (username != null)
                     {
                         username.text = userData.username;
-                        username.interactable = false;
+                        // username.interactable = false;
                     }
 
                     PlayerPrefs.SetString(nickNamePrefKey, userData.username);
@@ -738,14 +738,14 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     private void UpdateUIStats(int score, int kills) {
         // Ensure UI updates happen on the main thread
         if (scoreText != null) {
-            scoreText.text = $": {score}";
+            scoreText.text = $":{score}";
             Debug.Log($"Updated score text to: {score}");
         } else {
             Debug.LogWarning("scoreText is null!");
         }
         
         if (killsText != null) {
-            killsText.text = $": {kills}";
+            killsText.text = $":{kills}";
             Debug.Log($"Updated kills text to: {kills}");
         } else {
             Debug.LogWarning("killsText is null!");
@@ -1027,6 +1027,9 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
                 
                 sortedPlayers.Add(new KeyValuePair<string, PlayerStats>(playerName, stats));
                 Debug.Log($"Retrieved player stats: {playerName} - Score: {stats.Score}, Kills: {stats.Kills}");
+
+                // Send leaderboard entry to API for each player
+                StartCoroutine(AddLeaderboardEntry(playerName, stats.Kills, stats.Score));
             }
         }
 
@@ -1061,6 +1064,45 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         // Make sure the leaderboard is visible
         leaderboardPanel.SetActive(true);
         Debug.Log("Leaderboard display completed");
+    }
+
+    private IEnumerator AddLeaderboardEntry(string username, int kills, int score)
+    {
+        // Only send data for the local player
+        if (username != PhotonNetwork.LocalPlayer.NickName) yield break;
+
+        string url = "https://starkshoot-server.vercel.app/api/leaderboard/add";
+
+        LeaderboardEntryRequest requestData = new LeaderboardEntryRequest
+        {
+            walletAddress = walletAddress,
+            kills = kills,
+            score = score,
+            roomId = PhotonNetwork.CurrentRoom.Name,
+            username = username
+        };
+
+        string jsonData = JsonUtility.ToJson(requestData);
+        byte[] bodyRaw = System.Text.Encoding.UTF8.GetBytes(jsonData);
+
+        using (UnityWebRequest www = new UnityWebRequest(url, "POST"))
+        {
+            www.uploadHandler = new UploadHandlerRaw(bodyRaw);
+            www.downloadHandler = new DownloadHandlerBuffer();
+            www.SetRequestHeader("Content-Type", "application/json");
+
+            yield return www.SendWebRequest();
+
+            if (www.result == UnityWebRequest.Result.Success)
+            {
+                LeaderboardEntryResponse response = JsonUtility.FromJson<LeaderboardEntryResponse>(www.downloadHandler.text);
+                Debug.Log($"Successfully added leaderboard entry for {username}. Entry ID: {response._id}");
+            }
+            else
+            {
+                Debug.LogError($"Error adding leaderboard entry: {www.error}");
+            }
+        }
     }
 
     // Remove the duplicate OnRoomPropertiesUpdate method and combine functionality into a single method
@@ -2100,4 +2142,27 @@ public class UserData
     public int kills;
     public int score;
     public string username;
+}
+
+[System.Serializable]
+public class LeaderboardEntryRequest
+{
+    public string walletAddress;
+    public int kills;
+    public int score;
+    public string roomId;
+    public string username;
+}
+
+[System.Serializable]
+public class LeaderboardEntryResponse
+{
+    public string _id;
+    public string walletAddress;
+    public int kills;
+    public int score;
+    public string roomId;
+    public string username;
+    public string createdAt;
+    public int __v;
 }
