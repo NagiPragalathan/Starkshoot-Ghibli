@@ -490,6 +490,10 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     public override void OnJoinedLobby() {
         Debug.Log("Joined Lobby successfully!");
         serverWindow.SetActive(true);
+        // Show the start game canvas when entering lobby
+        if (startGameCanvas != null) {
+            startGameCanvas.SetActive(true);
+        }
         connectionText.text = "";
         
         // The room list will automatically start updating via OnRoomListUpdate callback
@@ -595,16 +599,16 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             return;
         }
 
+        // Destroy the start game canvas immediately when join button is clicked
+        if (startGameCanvas != null) {
+            Destroy(startGameCanvas);
+            startGameCanvas = null; // Clear the reference
+        }
+
         // Hide all UI elements
         if (serverWindow != null) serverWindow.SetActive(false);
         if (messageWindow != null) messageWindow.SetActive(false);
         if (leaderboardPanel != null) leaderboardPanel.SetActive(false);
-        
-        // Destroy the start game canvas if it exists
-        if (startGameCanvas != null)
-        {
-            Destroy(startGameCanvas);
-        }
         
         connectionText.text = "Joining room...";
         
@@ -643,6 +647,10 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             connectionText.text = "PhotonNetwork connection is not ready, try restart it.";
             // Re-enable UI if join fails
             if (serverWindow != null) serverWindow.SetActive(true);
+            // Re-enable start game canvas if join fails
+            if (startGameCanvas != null) {
+                startGameCanvas.SetActive(true);
+            }
         }
     }
 
@@ -655,12 +663,6 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         // Hide/disable all UI elements
         if (serverWindow != null) serverWindow.SetActive(false);
         if (leaderboardPanel != null) leaderboardPanel.SetActive(false);
-        
-        // Destroy the start game canvas if it hasn't been destroyed yet
-        if (startGameCanvas != null)
-        {
-            Destroy(startGameCanvas);
-        }
         
         // Show only necessary game UI
         if (messageWindow != null) messageWindow.SetActive(true);
