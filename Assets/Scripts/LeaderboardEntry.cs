@@ -11,11 +11,11 @@ public class LeaderboardEntry : MonoBehaviour {
     public Image backgroundImage;
 
     [Header("Colors")]
-    public Color firstPlaceColor = new Color(1f, 0.92f, 0.4f, 0.5f); // Gold
-    public Color secondPlaceColor = new Color(0.85f, 0.85f, 0.85f, 0.5f); // Silver
-    public Color thirdPlaceColor = new Color(1f, 0.7f, 0.4f, 0.5f); // Bronze
-    public Color defaultColor = new Color(0.13f, 0.15f, 0.18f, 0.3f); // Subtle dark
-    public Color localPlayerColor = new Color(0.3f, 0.7f, 1f, 0.5f); // Blue highlight
+    public Color firstPlaceColor = new Color(0.8f, 0.5f, 0.2f, 0.8f); // CC8033 - Bronze/Orange
+    public Color secondPlaceColor = new Color(0.3f, 0.7f, 1f, 0.8f); // 4CB2FF - Blue
+    public Color thirdPlaceColor = new Color(0.75f, 0.75f, 0.75f, 0.8f); // BFBFBF - Silver/Gray
+    public Color defaultColor = new Color(0f, 0f, 0f, 0.8f); // 000000 - Black
+    public Color localPlayerColor = new Color(0.3f, 0.7f, 1f, 0.8f); // 4CB2FF - Blue (same as second place)
 
     void Start() {
         Debug.Log("LeaderboardEntry Start called");
@@ -33,6 +33,7 @@ public class LeaderboardEntry : MonoBehaviour {
             rankText.text = rank.ToString();
             rankText.fontSize = 100;
             rankText.fontStyle = (rank <= 3) ? FontStyles.Bold : FontStyles.Normal;
+            rankText.color = Color.white;
         }
 
         // Player Name
@@ -40,7 +41,7 @@ public class LeaderboardEntry : MonoBehaviour {
         {
             playerNameText.text = playerName;
             playerNameText.fontSize = 100;
-            playerNameText.color = (playerName == PhotonNetwork.LocalPlayer.NickName) ? new Color(1f, 0.95f, 0.6f) : Color.white;
+            playerNameText.color = Color.white; // Changed to plain white for better visibility
         }
 
         // Score
