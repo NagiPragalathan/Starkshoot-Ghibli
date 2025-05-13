@@ -55,6 +55,8 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     private Dropdown timeSelectionDropdown;
     [SerializeField]
     private float[] timeOptions = { 180f, 300f, 600f }; // 3, 5, 10 minutes
+    [SerializeField]
+    private GameObject startGameCanvas; // New canvas to be destroyed when game starts
 
     [Header("NPC Settings")]
     [SerializeField] private GameObject npcPrefab;
@@ -593,7 +595,17 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             return;
         }
 
-        serverWindow.SetActive(false);
+        // Hide all UI elements
+        if (serverWindow != null) serverWindow.SetActive(false);
+        if (messageWindow != null) messageWindow.SetActive(false);
+        if (leaderboardPanel != null) leaderboardPanel.SetActive(false);
+        
+        // Destroy the start game canvas if it exists
+        if (startGameCanvas != null)
+        {
+            Destroy(startGameCanvas);
+        }
+        
         connectionText.text = "Joining room...";
         
         PhotonNetwork.LocalPlayer.NickName = username.text;
@@ -629,6 +641,8 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             PhotonNetwork.JoinOrCreateRoom(roomName.text, roomOptions, TypedLobby.Default);
         } else {
             connectionText.text = "PhotonNetwork connection is not ready, try restart it.";
+            // Re-enable UI if join fails
+            if (serverWindow != null) serverWindow.SetActive(true);
         }
     }
 
@@ -637,6 +651,21 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     /// </summary>
     public override void OnJoinedRoom() {
         Debug.Log($"Joined room: {PhotonNetwork.CurrentRoom.Name}");
+        
+        // Hide/disable all UI elements
+        if (serverWindow != null) serverWindow.SetActive(false);
+        if (leaderboardPanel != null) leaderboardPanel.SetActive(false);
+        
+        // Destroy the start game canvas if it hasn't been destroyed yet
+        if (startGameCanvas != null)
+        {
+            Destroy(startGameCanvas);
+        }
+        
+        // Show only necessary game UI
+        if (messageWindow != null) messageWindow.SetActive(true);
+        if (sightImage != null) sightImage.SetActive(true);
+        
         connectionText.text = "";
         Cursor.lockState = CursorLockMode.Locked;
         Cursor.visible = false;
