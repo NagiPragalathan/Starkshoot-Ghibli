@@ -1038,11 +1038,11 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
 
     void ShowFinalLeaderboard() {
         if (leaderboardContent == null || leaderboardPanel == null) {
-            Debug.LogError("Leaderboard UI components are missing!");
+            Debug.LogError("[Leaderboard] UI components are missing!");
             return;
         }
 
-        Debug.Log("Starting to show leaderboard...");
+        Debug.Log("[Leaderboard] Starting to show leaderboard...");
 
         // Clear existing entries
         foreach (Transform child in leaderboardContent) {
@@ -1050,14 +1050,19 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
                 Destroy(child.gameObject);
             }
         }
+        Debug.Log("[Leaderboard] Cleared existing entries");
 
         // Get stats from room properties
         var sortedPlayers = new List<KeyValuePair<string, PlayerStats>>();
         
         if (PhotonNetwork.CurrentRoom != null && 
-            PhotonNetwork.CurrentRoom.CustomProperties.ContainsKey(PLAYER_STATS_PROP_KEY)) {
+            PhotonNetwork.CurrentRoom.CustomProperties.ContainsKey(PLAYER_STATS_PROP_KEY)) 
+        {
+            Debug.Log("[Leaderboard] Processing room properties and player stats...");
             ExitGames.Client.Photon.Hashtable statsData = 
                 (ExitGames.Client.Photon.Hashtable)PhotonNetwork.CurrentRoom.CustomProperties[PLAYER_STATS_PROP_KEY];
+            
+            Debug.Log($"[Leaderboard] Found {statsData.Count} players in stats data");
             
             foreach (DictionaryEntry entry in statsData) {
                 string playerName = entry.Key.ToString();
@@ -1069,11 +1074,30 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
                 };
                 
                 sortedPlayers.Add(new KeyValuePair<string, PlayerStats>(playerName, stats));
-                Debug.Log($"Retrieved player stats: {playerName} - Score: {stats.Score}, Kills: {stats.Kills}");
+                Debug.Log($"[Leaderboard] Processing player: {playerName}, Score: {stats.Score}, Kills: {stats.Kills}");
 
                 // Send leaderboard entry to API for each player
                 StartCoroutine(AddLeaderboardEntry(playerName, stats.Kills, stats.Score));
+                
+                // Update staking status to false for the local player only
+                if (playerName == PhotonNetwork.LocalPlayer.NickName)
+                {
+                    Debug.Log($"[Leaderboard] Found local player {playerName}, updating staking status");
+                    if (string.IsNullOrEmpty(walletAddress))
+                    {
+                        Debug.LogWarning("[Leaderboard] Wallet address is null or empty!");
+                    }
+                    else
+                    {
+                        Debug.Log($"[Leaderboard] Starting staking status update for wallet: {walletAddress}");
+                        StartCoroutine(UpdateStakingStatus(walletAddress, false));
+                    }
+                }
             }
+        }
+        else
+        {
+            Debug.LogWarning("[Leaderboard] No player stats found in room properties!");
         }
 
         // Sort players by score and kills
@@ -1081,16 +1105,18 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             .OrderByDescending(p => p.Value.Score)
             .ThenByDescending(p => p.Value.Kills)
             .ToList();
+        Debug.Log($"[Leaderboard] Sorted {sortedPlayers.Count} players by score and kills");
 
         // Create leaderboard entries
         int maxEntries = 8;
+        Debug.Log($"[Leaderboard] Creating up to {maxEntries} leaderboard entries");
         for (int i = 0; i < maxEntries; i++) {
             GameObject entry = Instantiate(leaderboardEntryPrefab, leaderboardContent);
             LeaderboardEntry entryScript = entry.GetComponent<LeaderboardEntry>();
             
             if (i < sortedPlayers.Count) {
                 var playerStat = sortedPlayers[i];
-                Debug.Log($"Creating leaderboard entry for {playerStat.Key}: Score={playerStat.Value.Score}, Kills={playerStat.Value.Kills}");
+                Debug.Log($"[Leaderboard] Creating entry {i+1}: {playerStat.Key}, Score: {playerStat.Value.Score}, Kills: {playerStat.Value.Kills}");
                 entryScript.SetStats(
                     playerStat.Key,
                     playerStat.Value.Score,
@@ -1098,6 +1124,7 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
                     i + 1
                 );
             } else {
+                Debug.Log($"[Leaderboard] Creating empty entry for position {i+1}");
                 entryScript.SetStats("-|-", 0, 0, i + 1);
                 if (entryScript.scoreText != null) entryScript.scoreText.text = "-|-";
                 if (entryScript.killsText != null) entryScript.killsText.text = "-|-";
@@ -1106,7 +1133,7 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
 
         // Make sure the leaderboard is visible
         leaderboardPanel.SetActive(true);
-        Debug.Log("Leaderboard display completed");
+        Debug.Log("[Leaderboard] Display completed successfully");
     }
 
     private IEnumerator AddLeaderboardEntry(string username, int kills, int score)
@@ -2171,6 +2198,57 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             return address;
 
         return $"{address.Substring(0, 6)}...{address.Substring(address.Length - 4)}";
+    }
+
+    private IEnumerator UpdateStakingStatus(string walletAddress, bool isStaked)
+    {
+        Debug.Log($"[Staking Update] Starting staking status update for wallet: {walletAddress}, setting isStaked to: {isStaked}");
+
+        string url = "https://starkshoot-server.vercel.app/api/stake";
+        Debug.Log($"[Staking Update] API URL: {url}");
+
+        // Create request data
+        var requestData = new
+        {
+            walletAddress = walletAddress,
+            isStaked = isStaked
+        };
+
+        string jsonData = JsonUtility.ToJson(requestData);
+        Debug.Log($"[Staking Update] Request payload: {jsonData}");
+        byte[] bodyRaw = System.Text.Encoding.UTF8.GetBytes(jsonData);
+
+        using (UnityWebRequest www = new UnityWebRequest(url, "POST"))
+        {
+            Debug.Log("[Staking Update] Configuring web request...");
+            www.uploadHandler = new UploadHandlerRaw(bodyRaw);
+            www.downloadHandler = new DownloadHandlerBuffer();
+            www.SetRequestHeader("Content-Type", "application/json");
+
+            Debug.Log("[Staking Update] Sending request...");
+            yield return www.SendWebRequest();
+
+            if (www.result == UnityWebRequest.Result.Success)
+            {
+                string responseText = www.downloadHandler.text;
+                Debug.Log($"[Staking Update] Success! Response: {responseText}");
+                Debug.Log($"[Staking Update] Successfully updated staking status for wallet: {walletAddress} to {isStaked}");
+            }
+            else
+            {
+                Debug.LogError($"[Staking Update] Error updating staking status. Error: {www.error}");
+                Debug.LogError($"[Staking Update] Response Code: {www.responseCode}");
+                Debug.LogError($"[Staking Update] Full Response: {www.downloadHandler?.text}");
+                if (www.result == UnityWebRequest.Result.ProtocolError)
+                {
+                    Debug.LogError($"[Staking Update] HTTP Error: {www.responseCode}");
+                }
+                else if (www.result == UnityWebRequest.Result.ConnectionError)
+                {
+                    Debug.LogError("[Staking Update] Connection Error!");
+                }
+            }
+        }
     }
 }
 
