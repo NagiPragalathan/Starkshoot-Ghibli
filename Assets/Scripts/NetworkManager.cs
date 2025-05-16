@@ -338,62 +338,30 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
                 {
                     UserData userData = JsonConvert.DeserializeObject<UserData>(www.downloadHandler.text);
                     
-                    // Set username
+                    // Handle username field
                     if (username != null)
                     {
                         username.text = userData.username;
+                        username.interactable = testDebugMode; // Only writable in debug mode
                     }
+
+                    // Handle room name field
+                    if (roomName != null)
+                    {
+                        roomName.text = userData.currentRoom;
+                        roomName.interactable = testDebugMode; // Only writable in debug mode
+                    }
+
                     PlayerPrefs.SetString(nickNamePrefKey, userData.username);
                     PlayerPrefs.Save();
 
-                    // Set room name if available
-                    if (!string.IsNullOrEmpty(userData.currentRoom) && roomName != null)
-                    {
-                        roomName.text = userData.currentRoom;
-                    }
-
-                    // Handle duration from API
-                    if (!string.IsNullOrEmpty(userData.duration) && timeSelectionDropdown != null)
-                    {
-                        float durationInSeconds;
-                        if (float.TryParse(userData.duration, out durationInSeconds))
-                        {
-                            // Create a new list of time options including the API duration
-                            List<float> allTimeOptions = new List<float>(timeOptions);
-                            
-                            // Add the API duration if it's not already in the list
-                            if (!allTimeOptions.Contains(durationInSeconds))
-                            {
-                                allTimeOptions.Add(durationInSeconds);
-                                allTimeOptions.Sort(); // Sort the options
-                                
-                                // Update the dropdown with new options
-                                timeSelectionDropdown.ClearOptions();
-                                List<string> options = new List<string>();
-                                
-                                foreach (float time in allTimeOptions)
-                                {
-                                    int minutes = Mathf.FloorToInt(time / 60f);
-                                    options.Add($"{minutes} Min");
-                                }
-                                
-                                timeSelectionDropdown.AddOptions(options);
-                            }
-                            
-                            // Find the index of the API duration
-                            int durationIndex = allTimeOptions.IndexOf(durationInSeconds);
-                            if (durationIndex != -1)
-                            {
-                                timeSelectionDropdown.value = durationIndex;
-                            }
-                        }
-                    }
-
                     isStaked = userData.isStaked;
+                    
+                    // Update button state based on staking status and debug mode
                     UpdateJoinButtonState(true, isStaked);
 
                     isDataFetched = true;
-                    Debug.Log($"Successfully fetched user data for wallet: {walletAddress}. Staked: {isStaked}");
+                    Debug.Log($"Successfully fetched user data for wallet: {walletAddress}. Staked: {isStaked}, Room: {userData.currentRoom}");
                     
                     if (connectionText != null)
                     {
@@ -446,11 +414,15 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         isDataFetched = false;
         if (username != null)
         {
-            username.interactable = true;
+            username.interactable = testDebugMode;
             if (PlayerPrefs.HasKey(nickNamePrefKey))
             {
                 username.text = PlayerPrefs.GetString(nickNamePrefKey);
             }
+        }
+        if (roomName != null)
+        {
+            roomName.interactable = testDebugMode;
         }
         if (connectionText != null)
         {
@@ -463,10 +435,7 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             timeSelectionDropdown.ClearOptions();
             List<string> options = new List<string>();
             
-            // Create a list to store all time options including the API duration
-            List<float> allTimeOptions = new List<float>(timeOptions);
-            
-            foreach (float time in allTimeOptions) {
+            foreach (float time in timeOptions) {
                 int minutes = Mathf.FloorToInt(time / 60f);
                 options.Add($"{minutes} Minutes");
             }
@@ -1085,15 +1054,6 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             return;
         }
 
-        // Get the current room ID
-        string roomId = PhotonNetwork.CurrentRoom?.Name;
-        if (string.IsNullOrEmpty(roomId))
-        {
-            Debug.LogError("[Contract] Room ID is null or empty!");
-            return;
-        }
-        Debug.Log($"[Contract] Using room ID: {roomId}");
-
         Debug.Log("[Leaderboard] Starting to show leaderboard...");
 
         // Clear existing entries
@@ -1116,11 +1076,6 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             
             Debug.Log($"[Leaderboard] Found {statsData.Count} players in stats data");
             
-            // Collect all player wallet addresses
-            List<string> playerWallets = new List<string>();
-            string winnerWallet = "";
-            int highestScore = -1;
-            
             foreach (DictionaryEntry entry in statsData) {
                 string playerName = entry.Key.ToString();
                 ExitGames.Client.Photon.Hashtable playerData = (ExitGames.Client.Photon.Hashtable)entry.Value;
@@ -1133,6 +1088,9 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
                 sortedPlayers.Add(new KeyValuePair<string, PlayerStats>(playerName, stats));
                 Debug.Log($"[Leaderboard] Processing player: {playerName}, Score: {stats.Score}, Kills: {stats.Kills}");
 
+                // Send leaderboard entry to API for each player
+                StartCoroutine(AddLeaderboardEntry(playerName, stats.Kills, stats.Score));
+                
                 // Update staking status to false for the local player only
                 if (playerName == PhotonNetwork.LocalPlayer.NickName)
                 {
@@ -1145,27 +1103,8 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
                     {
                         Debug.Log($"[Leaderboard] Starting staking status update for wallet: {walletAddress}");
                         StartCoroutine(UpdateStakingStatus(walletAddress, false));
-                        playerWallets.Add(walletAddress);
-                        
-                        // Check if this player has the highest score
-                        if (stats.Score > highestScore)
-                        {
-                            highestScore = stats.Score;
-                            winnerWallet = walletAddress;
-                        }
                     }
                 }
-            }
-            
-            // Call APIs in sequence if we have players
-            if (playerWallets.Count > 0)
-            {
-                Debug.Log($"[Contract] Processing match data for room: {roomId}");
-                Debug.Log($"[Contract] Players: {string.Join(", ", playerWallets)}");
-                Debug.Log($"[Contract] Winner: {winnerWallet}");
-                
-                // Start the API call sequence
-                StartCoroutine(ProcessAPISequence(roomId, playerWallets.ToArray(), winnerWallet, sortedPlayers));
             }
         }
         else
@@ -1207,106 +1146,6 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         // Make sure the leaderboard is visible
         leaderboardPanel.SetActive(true);
         Debug.Log("[Leaderboard] Display completed successfully");
-    }
-
-    private IEnumerator ProcessAPISequence(string roomId, string[] players, string winner, List<KeyValuePair<string, PlayerStats>> sortedPlayers)
-    {
-        Debug.Log("[API Sequence] Starting API sequence...");
-
-        // Step 1: Call Leaderboard API for each player
-        foreach (var playerStat in sortedPlayers)
-        {
-            if (playerStat.Key == PhotonNetwork.LocalPlayer.NickName)
-            {
-                Debug.Log($"[API Sequence] Step 1: Adding leaderboard entry for {playerStat.Key}");
-                yield return StartCoroutine(AddLeaderboardEntry(playerStat.Key, playerStat.Value.Kills, playerStat.Value.Score));
-            }
-        }
-
-        // Step 2: Call Assign Players API
-        Debug.Log("[API Sequence] Step 2: Assigning players to match");
-        yield return StartCoroutine(AssignPlayersToMatch(roomId, players));
-
-        // Step 3: Call Set Winner API
-        if (!string.IsNullOrEmpty(winner))
-        {
-            Debug.Log("[API Sequence] Step 3: Setting match winner");
-            yield return StartCoroutine(SetMatchWinner(roomId, winner));
-        }
-
-        Debug.Log("[API Sequence] API sequence completed");
-    }
-
-    private IEnumerator AssignPlayersToMatch(string matchId, string[] players)
-    {
-        string url = "https://starkshoot-server.vercel.app/api/contract/assign";
-        Debug.Log($"[Contract] Assigning players to match {matchId}: {string.Join(", ", players)}");
-
-        ContractAssignPlayersRequest requestData = new ContractAssignPlayersRequest
-        {
-            matchId = matchId,
-            players = players
-        };
-
-        string jsonData = JsonUtility.ToJson(requestData);
-        byte[] bodyRaw = System.Text.Encoding.UTF8.GetBytes(jsonData);
-
-        using (UnityWebRequest www = new UnityWebRequest(url, "POST"))
-        {
-            www.uploadHandler = new UploadHandlerRaw(bodyRaw);
-            www.downloadHandler = new DownloadHandlerBuffer();
-            www.SetRequestHeader("Content-Type", "application/json");
-
-            yield return www.SendWebRequest();
-
-            if (www.result == UnityWebRequest.Result.Success)
-            {
-                ContractApiResponse response = JsonUtility.FromJson<ContractApiResponse>(www.downloadHandler.text);
-                Debug.Log($"[Contract] Successfully assigned players to match {matchId}. Response: {response.message}");
-            }
-            else
-            {
-                Debug.LogError($"[Contract] Error assigning players to match: {www.error}");
-                Debug.LogError($"[Contract] Response Code: {www.responseCode}");
-                Debug.LogError($"[Contract] Full Response: {www.downloadHandler?.text}");
-            }
-        }
-    }
-
-    private IEnumerator SetMatchWinner(string matchId, string winner)
-    {
-        string url = "https://starkshoot-server.vercel.app/api/contract/set-winner";
-        Debug.Log($"[Contract] Setting winner for match {matchId}: {winner}");
-
-        ContractSetWinnerRequest requestData = new ContractSetWinnerRequest
-        {
-            matchId = matchId,
-            winner = winner
-        };
-
-        string jsonData = JsonUtility.ToJson(requestData);
-        byte[] bodyRaw = System.Text.Encoding.UTF8.GetBytes(jsonData);
-
-        using (UnityWebRequest www = new UnityWebRequest(url, "POST"))
-        {
-            www.uploadHandler = new UploadHandlerRaw(bodyRaw);
-            www.downloadHandler = new DownloadHandlerBuffer();
-            www.SetRequestHeader("Content-Type", "application/json");
-
-            yield return www.SendWebRequest();
-
-            if (www.result == UnityWebRequest.Result.Success)
-            {
-                ContractApiResponse response = JsonUtility.FromJson<ContractApiResponse>(www.downloadHandler.text);
-                Debug.Log($"[Contract] Successfully set winner for match {matchId}. Response: {response.message}");
-            }
-            else
-            {
-                Debug.LogError($"[Contract] Error setting match winner: {www.error}");
-                Debug.LogError($"[Contract] Response Code: {www.responseCode}");
-                Debug.LogError($"[Contract] Full Response: {www.downloadHandler?.text}");
-            }
-        }
     }
 
     private IEnumerator AddLeaderboardEntry(string username, int kills, int score)
@@ -2380,8 +2219,8 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         string url = "https://starkshoot-server.vercel.app/api/stake";
         Debug.Log($"[Staking Update] API URL: {url}");
 
-        // Create request data using the proper serializable class
-        var requestData = new StakingUpdateRequest
+        // Create request data
+        var requestData = new
         {
             walletAddress = walletAddress,
             isStaked = isStaked
@@ -2405,19 +2244,7 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             {
                 string responseText = www.downloadHandler.text;
                 Debug.Log($"[Staking Update] Success! Response: {responseText}");
-                
-                // Parse the response using the proper response class
-                StakingUpdateResponse response = JsonUtility.FromJson<StakingUpdateResponse>(responseText);
-                
-                if (response != null && !string.IsNullOrEmpty(response.walletAddress))
-                {
-                    Debug.Log($"[Staking Update] Successfully updated staking status for wallet: {response.walletAddress} to {response.isStaked}");
-                }
-                else
-                {
-                    Debug.LogError("[Staking Update] Response parsing failed or wallet address is null in response");
-                    Debug.LogError($"[Staking Update] Raw response: {responseText}");
-                }
+                Debug.Log($"[Staking Update] Successfully updated staking status for wallet: {walletAddress} to {isStaked}");
             }
             else
             {
@@ -2473,45 +2300,4 @@ public class LeaderboardEntryResponse
     public string username;
     public string createdAt;
     public int __v;
-}
-
-[System.Serializable]
-public class ContractAssignPlayersRequest
-{
-    public string matchId;  // Changed from int to string since room ID is a string
-    public string[] players;
-}
-
-[System.Serializable]
-public class ContractSetWinnerRequest
-{
-    public string matchId;  // Changed from int to string since room ID is a string
-    public string winner;
-}
-
-[System.Serializable]
-public class ContractApiResponse
-{
-    public bool success;
-    public string message;
-}
-
-// Add this class with the other serializable classes at the bottom of the file
-[System.Serializable]
-public class StakingUpdateRequest
-{
-    public string walletAddress;
-    public bool isStaked;
-}
-
-[System.Serializable]
-public class StakingUpdateResponse
-{
-    public string _id;
-    public string walletAddress;
-    public int __v;
-    public string currentRoom;
-    public bool isStaked;
-    public int kills;
-    public int score;
 }
