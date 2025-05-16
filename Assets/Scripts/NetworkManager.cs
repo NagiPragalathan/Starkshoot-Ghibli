@@ -54,7 +54,7 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     [SerializeField]
     private Dropdown timeSelectionDropdown;
     [SerializeField]
-    private float[] timeOptions = { 180f, 300f, 600f }; // 3, 5, 10 minutes
+    private float[] timeOptions = { 180f, 300f, 600f }; // 3, 5, 10 minutes in seconds
     [SerializeField]
     private GameObject startGameCanvas; // New canvas to be destroyed when game starts
 
@@ -168,6 +168,9 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         if (returnToLobbyButton != null) {
             returnToLobbyButton.onClick.AddListener(ReturnToLobby);
         }
+
+        // Initialize fields as non-editable unless in debug mode
+        UpdateFieldsInteractability(false);
     }
 
     private void InitializeUI()
@@ -338,10 +341,10 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
                 {
                     UserData userData = JsonConvert.DeserializeObject<UserData>(www.downloadHandler.text);
                     
+                    // Set username
                     if (username != null)
                     {
                         username.text = userData.username;
-                        // username.interactable = false;
                     }
 
                     PlayerPrefs.SetString(nickNamePrefKey, userData.username);
@@ -349,11 +352,52 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
 
                     isStaked = userData.isStaked;
                     
+                    // Set room name if available
+                    if (!string.IsNullOrEmpty(userData.currentRoom) && roomName != null)
+                    {
+                        roomName.text = userData.currentRoom;
+                    }
+
+                    // Handle duration setting
+                    if (!string.IsNullOrEmpty(userData.duration) && timeSelectionDropdown != null)
+                    {
+                        if (float.TryParse(userData.duration, out float durationSeconds))
+                        {
+                            Debug.Log($"Received duration from API: {durationSeconds} seconds");
+
+                            // Add the new duration to timeOptions if it's not already there
+                            List<float> timeOptionsList = timeOptions.ToList();
+                            if (!timeOptionsList.Contains(durationSeconds))
+                            {
+                                timeOptionsList.Add(durationSeconds);
+                                timeOptionsList.Sort();
+                                timeOptions = timeOptionsList.ToArray();
+                                
+                                // Rebuild the dropdown
+                                SetupTimeDropdown();
+                            }
+
+                            // Find and set the duration
+                            int durationIndex = Array.IndexOf(timeOptions, durationSeconds);
+                            if (durationIndex != -1)
+                            {
+                                timeSelectionDropdown.value = durationIndex;
+                            }
+                        }
+                        else
+                        {
+                            Debug.LogWarning($"Could not parse duration value: {userData.duration}");
+                        }
+                    }
+
+                    // Update fields interactability based on debug mode
+                    UpdateFieldsInteractability(true);
+                    
                     // Update button state based on staking status and debug mode
                     UpdateJoinButtonState(true, isStaked);
 
                     isDataFetched = true;
-                    Debug.Log($"Successfully fetched user data for wallet: {walletAddress}. Staked: {isStaked}");
+                    Debug.Log($"Successfully fetched user data for wallet: {walletAddress}. Staked: {isStaked}, Room: {userData.currentRoom}, Duration: {userData.duration}");
                     
                     if (connectionText != null)
                     {
@@ -404,14 +448,15 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     private void HandleWalletError()
     {
         isDataFetched = false;
-        if (username != null)
+        
+        // In case of error, only allow editing in debug mode
+        UpdateFieldsInteractability(false);
+        
+        if (username != null && PlayerPrefs.HasKey(nickNamePrefKey))
         {
-            username.interactable = true;
-            if (PlayerPrefs.HasKey(nickNamePrefKey))
-            {
-                username.text = PlayerPrefs.GetString(nickNamePrefKey);
-            }
+            username.text = PlayerPrefs.GetString(nickNamePrefKey);
         }
+        
         if (connectionText != null)
         {
             connectionText.text = "Error fetching user data. Please try again.";
@@ -424,12 +469,27 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             List<string> options = new List<string>();
             
             foreach (float time in timeOptions) {
-                int minutes = Mathf.FloorToInt(time / 60f);
-                options.Add($"{minutes} Minutes");
+                if (time < 60)
+                {
+                    options.Add($"{time} Seconds");
+                }
+                else
+                {
+                    int minutes = Mathf.FloorToInt(time / 60f);
+                    int seconds = Mathf.FloorToInt(time % 60f);
+                    if (seconds == 0)
+                    {
+                        options.Add($"{minutes} Minutes");
+                    }
+                    else
+                    {
+                        options.Add($"{minutes}m {seconds}s");
+                    }
+                }
             }
             
             timeSelectionDropdown.AddOptions(options);
-            timeSelectionDropdown.value = 1; // Default to second option (5 minutes)
+            timeSelectionDropdown.value = 1; // Default to second option
         }
     }
 
@@ -2250,6 +2310,27 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             }
         }
     }
+
+    private void UpdateFieldsInteractability(bool canEdit)
+    {
+        // Only allow editing if in debug mode AND canEdit is true
+        bool isEditable = testDebugMode && canEdit;
+
+        if (username != null)
+        {
+            username.interactable = isEditable;
+        }
+
+        if (roomName != null)
+        {
+            roomName.interactable = isEditable;
+        }
+
+        if (timeSelectionDropdown != null)
+        {
+            timeSelectionDropdown.interactable = isEditable;
+        }
+    }
 }
 
 // Add this class to parse the API response
@@ -2263,6 +2344,8 @@ public class UserData
     public int kills;
     public int score;
     public string username;
+    public string currentRoom;  // Added new field
+    public string duration;     // Added new field
 }
 
 [System.Serializable]
