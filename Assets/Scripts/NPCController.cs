@@ -554,7 +554,7 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
 
     private void FindAndAttackPlayer()
     {
-        if (Time.time < nextAttackTime || isStuck) return;
+        if (isDead || Time.time < nextAttackTime || isStuck) return;
 
         Collider[] colliders = Physics.OverlapSphere(transform.position, detectionRange);
         Transform nearestPlayer = null;
@@ -819,6 +819,12 @@ public class NPCController : MonoBehaviourPunCallbacks, IPunObservable
         {
             agent.isStopped = true;
             agent.enabled = false;
+        }
+
+        // Disable the gun/shooting component
+        if (npcGun != null)
+        {
+            npcGun.enabled = false;
         }
 
         // Stop all coroutines

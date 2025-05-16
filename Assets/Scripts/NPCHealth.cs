@@ -204,10 +204,21 @@ public class NPCHealth : MonoBehaviourPunCallbacks, IPunObservable
         Vector3 deathPosition = transform.position;
 
         // Disable components
-        if (npcController != null) npcController.enabled = false;
+        if (npcController != null)
+        {
+            npcController.HandleDeath();
+            npcController.enabled = false;
+        }
         
         var agent = GetComponent<NavMeshAgent>();
         if (agent != null) agent.enabled = false;
+
+        // Disable any NPCTpsGun components
+        var guns = GetComponentsInChildren<NPCTpsGun>();
+        foreach (var gun in guns)
+        {
+            gun.enabled = false;
+        }
 
         // Play death animation
         if (animator != null)
@@ -231,8 +242,31 @@ public class NPCHealth : MonoBehaviourPunCallbacks, IPunObservable
             
             networkManager.photonView.RPC("AddBotKill_RPC", RpcTarget.All, 
                 killerName, BotName);
+        }
 
-            // Notify master client to handle respawn
+        // Start death sequence
+        StartCoroutine(DeathSequence(deathPosition));
+    }
+
+    private IEnumerator DeathSequence(Vector3 deathPosition)
+    {
+        // Wait for 2 seconds
+        yield return new WaitForSeconds(2f);
+
+        // Start sinking
+        isSinking = true;
+        
+        // Disable physics
+        var rb = GetComponent<Rigidbody>();
+        if (rb != null)
+        {
+            rb.isKinematic = true;
+            rb.useGravity = false;
+        }
+
+        // Notify master client to handle respawn
+        if (networkManager != null)
+        {
             if (PhotonNetwork.IsMasterClient)
             {
                 networkManager.RequestNPCRespawn(deathPosition);
@@ -244,38 +278,10 @@ public class NPCHealth : MonoBehaviourPunCallbacks, IPunObservable
             }
         }
 
-        // Start death sequence
-        StartCoroutine(StartSinking());
-    }
-
-    IEnumerator StartSinking()
-    {
+        // Wait for sink animation
         yield return new WaitForSeconds(sinkTime);
-        isSinking = true;
-        
-        // Disable physics
-        var rb = GetComponent<Rigidbody>();
-        if (rb != null)
-        {
-            rb.isKinematic = true;
-            rb.useGravity = false;
-        }
-    }
 
-    private IEnumerator DestroyAfterDelay()
-    {
-        // Wait for sinking animation
-        yield return new WaitForSeconds(sinkTime); 
-        
-        // Add "leaving battlefield" message
-        if (networkManager != null && networkManager.photonView != null)
-        {
-            networkManager.photonView.RPC("AddMessage_RPC", RpcTarget.All, $"{BotName} has left the battlefield!");
-        }
-        
-        // Wait remaining time before destroying
-        yield return new WaitForSeconds(respawnTime - sinkTime);
-        
+        // Destroy the NPC if we're the master client
         if (PhotonNetwork.IsMasterClient)
         {
             PhotonNetwork.Destroy(gameObject);

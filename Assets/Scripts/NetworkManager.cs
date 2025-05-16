@@ -596,19 +596,21 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
 
             int realPlayerCount = room.CustomProperties.ContainsKey("RealPlayerCount") ? 
                 (int)room.CustomProperties["RealPlayerCount"] : 0;
-            int npcCount = room.CustomProperties.ContainsKey("NPCCount") ? 
-                (int)room.CustomProperties["NPCCount"] : 0;
-            int totalPlayers = room.CustomProperties.ContainsKey("TotalPlayers") ? 
-                (int)room.CustomProperties["TotalPlayers"] : 0;
 
             string roomStatus = GetRoomStatusText(room, realPlayerCount);
             
+            // Get game time from room properties
+            string timeDisplay = "";
+            if (room.CustomProperties.ContainsKey("GameTime")) {
+                float gameTime = (float)room.CustomProperties["GameTime"];
+                int minutes = Mathf.FloorToInt(gameTime / 60f);
+                timeDisplay = $"{minutes} Minutes";
+            }
+
             roomList.text += $"Room: {room.Name}\n" +
-                            $"Real Players: {realPlayerCount}/{room.MaxPlayers}\n" +
-                            $"Bots: {npcCount}\n" +
-                            $"Total: {totalPlayers}/6\n" +
+                            $"Players: {realPlayerCount}/{room.MaxPlayers}\n" +
+                            $"Time: {timeDisplay}\n" +
                             $"Status: {roomStatus}\n" +
-                            GetRoomCustomPropertiesText(room) +
                             "-------------------\n";
         }
     }
@@ -749,6 +751,11 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         
         Respawn(0.0f);
         InitializePlayerStats();
+
+        // If master client, force reset NPCs
+        if (PhotonNetwork.IsMasterClient) {
+            ForceResetNPCs();
+        }
     }
 
     /// <summary>
@@ -814,19 +821,11 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     /// </summary>
     public override void OnPlayerLeftRoom(Player other) {
         if (PhotonNetwork.IsMasterClient) {
+            Debug.Log($"Player {other.NickName} left - Updating NPC count");
+            
             AddMessage("Player " + other.NickName + " Left Game.");
             
-            // Update room properties
-            ExitGames.Client.Photon.Hashtable roomProps = new ExitGames.Client.Photon.Hashtable();
-            int realPlayerCount = PhotonNetwork.CurrentRoom.PlayerCount;
-            int currentNPCs = GameObject.FindGameObjectsWithTag("NPC").Length;
-            
-            roomProps["RealPlayerCount"] = realPlayerCount;
-            roomProps["NPCCount"] = currentNPCs;
-            roomProps["TotalPlayers"] = realPlayerCount + currentNPCs;
-            PhotonNetwork.CurrentRoom.SetCustomProperties(roomProps);
-            
-            // Update NPC count
+            // Update NPC count immediately when a player leaves
             UpdateNPCCount();
         }
 
@@ -1006,6 +1005,16 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         if (PhotonNetwork.IsMasterClient && isGameActive && Time.frameCount % 60 == 0) // 60 frames ≈ 1 second at 60 FPS
         {
             MaintainNPCCount();
+        }
+
+        if (PhotonNetwork.IsMasterClient && Time.frameCount % 300 == 0) { // Check every ~5 seconds
+            GameObject[] npcs = GameObject.FindGameObjectsWithTag("NPC");
+            int maxAllowed = 6 - PhotonNetwork.CurrentRoom.PlayerCount;
+            
+            if (npcs.Length > maxAllowed) {
+                Debug.Log("[PERIODIC CHECK] Found incorrect NPC count! Triggering emergency cleanup!");
+                UpdateNPCCount(); // Force cleanup and respawn
+            }
         }
     }
 
@@ -1447,28 +1456,19 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
 
     // Add these new callbacks to track player join/leave events
     public override void OnPlayerEnteredRoom(Player newPlayer) {
-        base.OnPlayerEnteredRoom(newPlayer);
-        
         if (PhotonNetwork.IsMasterClient) {
-            // Update room properties
-            ExitGames.Client.Photon.Hashtable roomProps = new ExitGames.Client.Photon.Hashtable();
-            int realPlayerCount = PhotonNetwork.CurrentRoom.PlayerCount;
-            int currentNPCs = GameObject.FindGameObjectsWithTag("NPC").Length;
+            Debug.Log($"Player {newPlayer.NickName} joined - Updating NPC count");
             
-            // If game is in progress and we have NPCs, remove one
-            if (isGameActive && currentNPCs > 0) {
-                RemoveExcessNPCs(1); // Remove one NPC
-                currentNPCs--;
-                AddMessage($"Removed one bot to make room for {newPlayer.NickName}");
-            }
-            
-            roomProps["RealPlayerCount"] = realPlayerCount;
-            roomProps["NPCCount"] = currentNPCs;
-            roomProps["TotalPlayers"] = realPlayerCount + currentNPCs;
-            PhotonNetwork.CurrentRoom.SetCustomProperties(roomProps);
-            
-            // Update NPC count
+            // Update NPC count immediately when a new player joins
             UpdateNPCCount();
+            
+            AddMessage("Player " + newPlayer.NickName + " Joined Game.");
+        }
+
+        if (PhotonNetwork.IsMasterClient) {
+            Debug.Log($"[PLAYER JOIN] Player {newPlayer.NickName} joined - Forcing NPC reset");
+            ForceResetNPCs();
+            AddMessage("Player " + newPlayer.NickName + " Joined Game.");
         }
     }
 
@@ -1548,12 +1548,17 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
 
     public GameObject SpawnNPC()
     {
-        if (!PhotonNetwork.IsMasterClient)
-        {
-            Debug.LogWarning("Only MasterClient can spawn NPCs!");
+        if (!PhotonNetwork.IsMasterClient) return null;
+
+        // SAFETY CHECK - Don't spawn if we already have max NPCs
+        int currentNPCs = GameObject.FindGameObjectsWithTag("NPC").Length;
+        int maxAllowed = 6 - PhotonNetwork.CurrentRoom.PlayerCount;
+        
+        if (currentNPCs >= maxAllowed) {
+            Debug.Log($"[SPAWN BLOCKED] Already have {currentNPCs} NPCs, maximum allowed is {maxAllowed}");
             return null;
         }
-        
+
         Debug.Log("SpawnNPC called by MasterClient");
         
         // Choose a random spawn point
@@ -2160,61 +2165,109 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
     // Add this method to calculate required NPCs
     private int CalculateRequiredNPCs() {
         int realPlayerCount = PhotonNetwork.CurrentRoom.PlayerCount;
-        return Mathf.Max(0, TARGET_TOTAL_PLAYERS - realPlayerCount);
+        // Make sure we never exceed TARGET_TOTAL_PLAYERS
+        return Mathf.Min(
+            Mathf.Max(0, TARGET_TOTAL_PLAYERS - realPlayerCount),
+            TARGET_TOTAL_PLAYERS - realPlayerCount
+        );
     }
 
     // Add this method to handle NPC count updates
     private void UpdateNPCCount() {
         if (!PhotonNetwork.IsMasterClient) return;
 
-        int requiredNPCs = CalculateRequiredNPCs();
-        int currentNPCs = GameObject.FindGameObjectsWithTag("NPC").Length;
+        // HARD CHECK - Get exact count
+        GameObject[] allNPCs = GameObject.FindGameObjectsWithTag("NPC");
+        int realPlayerCount = PhotonNetwork.CurrentRoom.PlayerCount;
+        int maxAllowedNPCs = 6 - realPlayerCount; // This is the MAXIMUM allowed
         
-        Debug.Log($"Updating NPC count - Required: {requiredNPCs}, Current: {currentNPCs}");
-        
-        if (currentNPCs < requiredNPCs) {
-            // Need to spawn more NPCs
-            int npcsToSpawn = requiredNPCs - currentNPCs;
-            StartCoroutine(SpawnAdditionalNPCs(npcsToSpawn));
-        } else if (currentNPCs > requiredNPCs) {
-            // Need to remove some NPCs
-            int npcsToRemove = currentNPCs - requiredNPCs;
-            RemoveExcessNPCs(npcsToRemove);
+        Debug.Log($"[CRITICAL NPC CHECK] Players: {realPlayerCount}, Current NPCs: {allNPCs.Length}, Max Allowed: {maxAllowedNPCs}");
+
+        // IMMEDIATE CLEANUP if we have too many
+        if (allNPCs.Length > maxAllowedNPCs) {
+            Debug.Log($"[EMERGENCY CLEANUP] Found {allNPCs.Length} NPCs but only allowed {maxAllowedNPCs}! FORCING CLEANUP!");
+            
+            // Destroy ALL NPCs and respawn correct amount
+            foreach (GameObject npc in allNPCs) {
+                if (npc != null) {
+                    Debug.Log($"[EMERGENCY CLEANUP] Destroying: {npc.name}");
+                    PhotonNetwork.Destroy(npc);
+                }
+            }
+            
+            // Wait a frame then spawn correct amount
+            StartCoroutine(SpawnCorrectNPCCount(maxAllowedNPCs));
         }
 
-        // Update room properties and sync with all clients
+        // Update room properties with correct counts
         ExitGames.Client.Photon.Hashtable roomProps = new ExitGames.Client.Photon.Hashtable();
-        int realPlayerCount = PhotonNetwork.CurrentRoom.PlayerCount;
         roomProps["RealPlayerCount"] = realPlayerCount;
-        roomProps["NPCCount"] = requiredNPCs;
-        roomProps["TotalPlayers"] = realPlayerCount + requiredNPCs;
+        roomProps["NPCCount"] = maxAllowedNPCs;
+        roomProps["TotalPlayers"] = realPlayerCount + maxAllowedNPCs;
         PhotonNetwork.CurrentRoom.SetCustomProperties(roomProps);
-
-        // Sync bot state with all clients
-        photonView.RPC("SyncBotState_RPC", RpcTarget.All, currentNPCs, requiredNPCs);
     }
 
-    // Add this coroutine to spawn additional NPCs
-    private IEnumerator SpawnAdditionalNPCs(int count) {
+    private IEnumerator SpawnCorrectNPCCount(int count) {
+        yield return new WaitForSeconds(1f); // Wait for cleanup
+        
+        Debug.Log($"[NPC RESPAWN] Spawning exactly {count} NPCs");
         for (int i = 0; i < count; i++) {
             SpawnNPC();
-            yield return new WaitForSeconds(0.5f); // Small delay between spawns
+            yield return new WaitForSeconds(0.5f);
         }
     }
 
-    // Add this method to remove excess NPCs
+    // Add this method to force cleanup all NPCs and respawn the correct amount
+    public void ForceResetNPCs() {
+        if (!PhotonNetwork.IsMasterClient) return;
+
+        Debug.Log("[FORCE RESET] Starting force reset of all NPCs");
+        
+        // First, destroy all existing NPCs
+        GameObject[] allNPCs = GameObject.FindGameObjectsWithTag("NPC");
+        foreach (GameObject npc in allNPCs) {
+            if (npc != null) {
+                Debug.Log($"[FORCE RESET] Destroying NPC: {npc.name}");
+                PhotonNetwork.Destroy(npc);
+            }
+        }
+
+        // Wait a frame to ensure all NPCs are destroyed
+        StartCoroutine(DelayedNPCRespawn());
+    }
+
+    private IEnumerator DelayedNPCRespawn() {
+        yield return new WaitForSeconds(1f); // Wait a second to ensure cleanup
+        UpdateNPCCount(); // This will spawn the correct number of NPCs
+    }
+
     private void RemoveExcessNPCs(int count) {
         GameObject[] npcs = GameObject.FindGameObjectsWithTag("NPC");
-        int removed = 0;
+        Debug.Log($"[NPC Removal] Found {npcs.Length} NPCs, removing {count}");
         
+        int removed = 0;
         foreach (GameObject npc in npcs) {
             if (removed >= count) break;
             
             if (npc != null) {
+                Debug.Log($"[NPC Removal] Destroying NPC {npc.name}");
                 PhotonNetwork.Destroy(npc);
                 removed++;
             }
         }
+        Debug.Log($"[NPC Removal] Successfully removed {removed} NPCs");
+    }
+
+    private IEnumerator SpawnAdditionalNPCs(int count) {
+        Debug.Log($"[NPC Spawn] Starting to spawn {count} NPCs");
+        for (int i = 0; i < count; i++) {
+            GameObject npc = SpawnNPC();
+            if (npc != null) {
+                Debug.Log($"[NPC Spawn] Successfully spawned NPC {i + 1}/{count}");
+            }
+            yield return new WaitForSeconds(0.5f); // Small delay between spawns
+        }
+        Debug.Log("[NPC Spawn] Finished spawning NPCs");
     }
 
     // Add these new RPCs for better bot synchronization
