@@ -782,6 +782,17 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             UpdateNPCCount();
         }
 
+        // Check if room should be closed (no real players left)
+        if (PhotonNetwork.CurrentRoom.PlayerCount == 0) {
+            Debug.Log("No players remaining, closing room");
+            if (PhotonNetwork.IsMasterClient) {
+                PhotonNetwork.CurrentRoom.IsOpen = false;
+                PhotonNetwork.CurrentRoom.IsVisible = false;
+                PhotonNetwork.DestroyAll(); // Clean up all network objects
+                PhotonNetwork.LeaveRoom();
+            }
+        }
+
         string roomName = PhotonNetwork.CurrentRoom.Name;
         if (roomPlayerCounts.ContainsKey(roomName)) {
             roomPlayerCounts[roomName] = PhotonNetwork.CurrentRoom.PlayerCount;
@@ -906,6 +917,16 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         if (isGameActive && PhotonNetwork.IsMasterClient) {
             if (currentGameTime > 0) {
                 currentGameTime -= Time.deltaTime;
+                
+                // Store current game time in room properties periodically (every second)
+                if (Mathf.FloorToInt(currentGameTime) != Mathf.FloorToInt(currentGameTime + Time.deltaTime)) {
+                    ExitGames.Client.Photon.Hashtable gameState = new ExitGames.Client.Photon.Hashtable() {
+                        {"GameTime", currentGameTime},
+                        {"GameActive", isGameActive}
+                    };
+                    PhotonNetwork.CurrentRoom.SetCustomProperties(gameState);
+                }
+                
                 photonView.RPC("SyncTimer", RpcTarget.All, currentGameTime);
 
                 if (currentGameTime <= 0) {
@@ -1529,28 +1550,31 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         
         try
         {
-            // Instantiate the NPC
-            GameObject npc = PhotonNetwork.Instantiate(npcPrefab.name, spawnPosition, spawnRotation, 0);
+            // Set AutoCleanUp to false to prevent automatic destruction on creator disconnect
+            var instantiationData = new object[] { false }; // AutoCleanUp flag
             
-            if (npc != null)
-            {
+            // Instantiate the NPC with instantiation data
+            GameObject npc = PhotonNetwork.Instantiate(npcPrefab.name, spawnPosition, spawnRotation, 0, instantiationData);
+            
+            if (npc != null) {
                 PhotonView pv = npc.GetComponent<PhotonView>();
+                // Set AutoCleanUp to false
+                if (pv != null) {
+                    pv.ObservedComponents = new List<Component>(); // Clear observed components
+                    pv.Synchronization = ViewSynchronization.UnreliableOnChange;  // Note the capital 'S'
+                    pv.OwnershipTransfer = OwnershipOption.Takeover;  // Note the capital 'O'
+                }
+                
                 Debug.Log($"NPC spawned with PhotonView ID: {pv.ViewID} at position: {spawnPosition}");
                 SetupNPC(npc);
-                
-                // Don't add message here since the bot name isn't set yet
-                // The message will be added in the SetBotName RPC in NPCHealth
-                
                 return npc;
             }
-            else
-            {
+            else {
                 Debug.LogError("Failed to instantiate NPC prefab!");
                 return null;
             }
         }
-        catch (System.Exception e)
-        {
+        catch (System.Exception e) {
             Debug.LogError($"Error spawning NPC: {e.Message}");
             return null;
         }
@@ -2258,6 +2282,35 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
                 else if (www.result == UnityWebRequest.Result.ConnectionError)
                 {
                     Debug.LogError("[Staking Update] Connection Error!");
+                }
+            }
+        }
+    }
+
+    // Add this method to handle master client switching
+    public override void OnMasterClientSwitched(Player newMasterClient) {
+        Debug.Log($"Master client switched to: {newMasterClient.NickName}");
+        
+        if (newMasterClient.IsLocal) {
+            Debug.Log("We are the new master client!");
+            
+            // Restore game state
+            if (PhotonNetwork.CurrentRoom != null) {
+                // Get the current game time from room properties
+                if (PhotonNetwork.CurrentRoom.CustomProperties.ContainsKey("GameTime")) {
+                    currentGameTime = (float)PhotonNetwork.CurrentRoom.CustomProperties["GameTime"];
+                }
+                
+                // Get the game active state from room properties
+                if (PhotonNetwork.CurrentRoom.CustomProperties.ContainsKey("GameActive")) {
+                    isGameActive = (bool)PhotonNetwork.CurrentRoom.CustomProperties["GameActive"];
+                }
+                
+                // Resume timer if game was active
+                if (isGameActive) {
+                    Debug.Log("Resuming game timer after host migration");
+                    photonView.RPC("SyncTimer", RpcTarget.All, currentGameTime);
+                    photonView.RPC("SyncGameState", RpcTarget.All, isGameActive);
                 }
             }
         }
