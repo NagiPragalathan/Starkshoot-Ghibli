@@ -338,58 +338,18 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
                 {
                     UserData userData = JsonConvert.DeserializeObject<UserData>(www.downloadHandler.text);
                     
-                    // Set username
                     if (username != null)
                     {
                         username.text = userData.username;
+                        // username.interactable = false;
                     }
+
                     PlayerPrefs.SetString(nickNamePrefKey, userData.username);
                     PlayerPrefs.Save();
 
-                    // Set room name if available
-                    if (!string.IsNullOrEmpty(userData.currentRoom) && roomName != null)
-                    {
-                        roomName.text = userData.currentRoom;
-                    }
-
-                    // Handle duration from API
-                    if (!string.IsNullOrEmpty(userData.duration) && timeSelectionDropdown != null)
-                    {
-                        float durationInSeconds;
-                        if (float.TryParse(userData.duration, out durationInSeconds))
-                        {
-                            // Create a new list of time options including the API duration
-                            List<float> allTimeOptions = new List<float>(timeOptions);
-                            
-                            // Add the API duration if it's not already in the list
-                            if (!allTimeOptions.Contains(durationInSeconds))
-                            {
-                                allTimeOptions.Add(durationInSeconds);
-                                allTimeOptions.Sort(); // Sort the options
-                                
-                                // Update the dropdown with new options
-                                timeSelectionDropdown.ClearOptions();
-                                List<string> options = new List<string>();
-                                
-                                foreach (float time in allTimeOptions)
-                                {
-                                    int minutes = Mathf.FloorToInt(time / 60f);
-                                    options.Add($"{minutes} Min");
-                                }
-                                
-                                timeSelectionDropdown.AddOptions(options);
-                            }
-                            
-                            // Find the index of the API duration
-                            int durationIndex = allTimeOptions.IndexOf(durationInSeconds);
-                            if (durationIndex != -1)
-                            {
-                                timeSelectionDropdown.value = durationIndex;
-                            }
-                        }
-                    }
-
                     isStaked = userData.isStaked;
+                    
+                    // Update button state based on staking status and debug mode
                     UpdateJoinButtonState(true, isStaked);
 
                     isDataFetched = true;
@@ -463,10 +423,7 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             timeSelectionDropdown.ClearOptions();
             List<string> options = new List<string>();
             
-            // Create a list to store all time options including the API duration
-            List<float> allTimeOptions = new List<float>(timeOptions);
-            
-            foreach (float time in allTimeOptions) {
+            foreach (float time in timeOptions) {
                 int minutes = Mathf.FloorToInt(time / 60f);
                 options.Add($"{minutes} Minutes");
             }
@@ -2380,8 +2337,8 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
         string url = "https://starkshoot-server.vercel.app/api/stake";
         Debug.Log($"[Staking Update] API URL: {url}");
 
-        // Create request data using the proper serializable class
-        var requestData = new StakingUpdateRequest
+        // Create request data
+        var requestData = new
         {
             walletAddress = walletAddress,
             isStaked = isStaked
@@ -2405,19 +2362,7 @@ public class NetworkManager : MonoBehaviourPunCallbacks {
             {
                 string responseText = www.downloadHandler.text;
                 Debug.Log($"[Staking Update] Success! Response: {responseText}");
-                
-                // Parse the response using the proper response class
-                StakingUpdateResponse response = JsonUtility.FromJson<StakingUpdateResponse>(responseText);
-                
-                if (response != null && !string.IsNullOrEmpty(response.walletAddress))
-                {
-                    Debug.Log($"[Staking Update] Successfully updated staking status for wallet: {response.walletAddress} to {response.isStaked}");
-                }
-                else
-                {
-                    Debug.LogError("[Staking Update] Response parsing failed or wallet address is null in response");
-                    Debug.LogError($"[Staking Update] Raw response: {responseText}");
-                }
+                Debug.Log($"[Staking Update] Successfully updated staking status for wallet: {walletAddress} to {isStaked}");
             }
             else
             {
@@ -2448,8 +2393,6 @@ public class UserData
     public int kills;
     public int score;
     public string username;
-    public string currentRoom;  // Add this field
-    public string duration;     // Add this field
 }
 
 [System.Serializable]
@@ -2494,24 +2437,4 @@ public class ContractApiResponse
 {
     public bool success;
     public string message;
-}
-
-// Add this class with the other serializable classes at the bottom of the file
-[System.Serializable]
-public class StakingUpdateRequest
-{
-    public string walletAddress;
-    public bool isStaked;
-}
-
-[System.Serializable]
-public class StakingUpdateResponse
-{
-    public string _id;
-    public string walletAddress;
-    public int __v;
-    public string currentRoom;
-    public bool isStaked;
-    public int kills;
-    public int score;
 }

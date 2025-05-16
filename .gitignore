@@ -61,3 +61,6 @@ sysinfo.txt
 # Builds
 *.apk
 *.unitypackage
+
+
+node_modules/
